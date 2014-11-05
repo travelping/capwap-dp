@@ -55,7 +55,24 @@ AC_CHECK_LIBM
 AM_MAINTAINER_MODE
 
 AC_MSG_PART(required libraries)
-AC_CHECK_LIB([ev], [event_init],,             AC_MSG_ERROR(Required library ev missing))
+AC_CHECK_LIB([ev], [event_init],, AC_MSG_ERROR(Required library ev missing))
+AC_CHECK_LIB([pthread], [pthread_create],, AC_MSG_ERROR(Required library pthread missing))
+PKG_CHECK_MODULES([URCU], [liburcu],, AC_MSG_ERROR(Required library urcu missing))
+PKG_CHECK_MODULES([URCUCDS], [liburcu-cds],, AC_MSG_ERROR(Required library urcu-cds missing))
+
+ERL_CRASH_DUMP=/dev/null
+EIBASE="`erl -noshell -noinput -eval 'io:format (\"~s\", [[ code:lib_dir (erl_interface) ]])' -s erlang halt`"
+AC_SUBST([EIBASE])
+
+ERTSBASE="`erl -noshell -noinput -eval 'io:format (\"~s\", [[ \"/\" ++ filename:join (lists:reverse ([ \"erts-\" ++ erlang:system_info (version) | tl (lists:reverse (string:tokens (code:lib_dir (), \"/\"))) ])) ]]).' -s erlang halt `"
+AC_SUBST([ERTSBASE])
+
+CPPFLAGS="$CPPFLAGS -I${EIBASE}/include -I${ERTSBASE}/include"
+LDFLAGS="$LDFLAGS -L${EIBASE}/lib -L${ERTSBASE}/lib"
+
+AC_CHECK_HEADER([erl_interface.h], [], [AC_MSG_ERROR([can't find erl_interface.h; under debian you need to install erlang-src])], [])
+AC_CHECK_LIB([ei], [ei_set_compat_rel], [], [AC_MSG_ERROR([can't find libei])], [])
+AC_CHECK_LIB([erl_interface], [erl_compare_ext], [], [AC_MSG_ERROR([can't find liberl_interface])], [])
 
 AC_CONFIG_FILES([
         Makefile
