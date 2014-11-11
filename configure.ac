@@ -54,6 +54,8 @@ AC_CHECK_LIBM
 
 AM_MAINTAINER_MODE
 
+AC_HEADER_ASSERT
+
 AC_MSG_PART(required libraries)
 AC_CHECK_LIB([ev], [event_init],, AC_MSG_ERROR(Required library ev missing))
 AC_CHECK_LIB([pthread], [pthread_create],, AC_MSG_ERROR(Required library pthread missing))

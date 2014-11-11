@@ -39,6 +39,7 @@
 #include "common.h"
 #include "ieee802_11_defs.h"
 
+#include "debug.h"
 #include "capwap-dp.h"
 #include "netns.h"
 
@@ -123,19 +124,20 @@ void detach_station_from_wtp(struct station *sta)
 	refcount_put_client(sta->wtp);
 }
 
-static void hexdump(FILE *stream, const unsigned char *buf, ssize_t len)
+static void hexdump(const unsigned char *buf, ssize_t len)
 {
 	ssize_t i;
 
 	for (i = 0; i < len; i++) {
 		if (i % 16 == 0) {
 			if (i != 0)
-				fprintf(stream, "\n");
-			fprintf(stream, "0x%08zx:  ", i);
+				debug_log("\n");
+			debug_log("0x%08zx:  ", i);
 		}
-		fprintf(stream, "%02x ", buf[i]);
+		debug_log("%02x ", buf[i]);
 	}
-	fprintf(stream, "\n");
+	debug_log("\n");
+	debug_flush();
 }
 
 #define SOCK_ADDR_CMP(a, b, socktype, field)				\
@@ -243,14 +245,14 @@ static void forward_capwap(struct worker *w, struct sockaddr *addr, struct ether
 
 	rcu_read_lock();
 
-	fprintf(stderr, "%lx: fwd CW ether: %02x:%02x:%02x:%02x:%02x:%02x\n", w->tid,
-		ether->ether_shost[0], ether->ether_shost[1], ether->ether_shost[2],
-		ether->ether_shost[3], ether->ether_shost[4], ether->ether_shost[5]);
+	debug("%lx: fwd CW ether: %02x:%02x:%02x:%02x:%02x:%02x\n", w->tid,
+	      ether->ether_shost[0], ether->ether_shost[1], ether->ether_shost[2],
+	      ether->ether_shost[3], ether->ether_shost[4], ether->ether_shost[5]);
 
 	if ((sta = find_station(ether->ether_shost)) != NULL) {
 		/* queue packet to TAP */
 
-		fprintf(stderr, "%lx: found STA %p, WTP %p\n", w->tid, sta, sta->wtp);
+		debug("%lx: found STA %p, WTP %p\n", w->tid, sta, sta->wtp);
 	}
 
 	/* FIXME: shortcat write */
@@ -259,11 +261,11 @@ static void forward_capwap(struct worker *w, struct sockaddr *addr, struct ether
 	iov[1].iov_base = data;
 	iov[1].iov_len = len;
 
-	hexdump(stderr, iov[0].iov_base, iov[0].iov_len);
-	hexdump(stderr, iov[1].iov_base, iov[1].iov_len);
+	hexdump(iov[0].iov_base, iov[0].iov_len);
+	hexdump(iov[1].iov_base, iov[1].iov_len);
 
 	r = writev(w->tap_fd, iov, 2);
-	fprintf(stderr, "%lx: fwd CW writev: %d\n", w->tid, r);
+	debug("%lx: fwd CW writev: %d\n", w->tid, r);
 
 	rcu_read_unlock();
 }
@@ -279,9 +281,9 @@ static void capwap_recv(struct worker *w, struct msghdr *msg, unsigned char *buf
 	unsigned int datalen;
 
 	inet_ntop(addr->sa_family, SIN_ADDR_PTR(addr), ipaddr, sizeof(ipaddr));
-	fprintf(stderr, "%lx(%u): read %d bytes from %s:%d\n",
-		w->tid, w->id, len, ipaddr, ntohs(SIN_PORT(addr)));
-	hexdump(stderr, buffer, len);
+	debug("%lx(%u): read %d bytes from %s:%d\n",
+	      w->tid, w->id, len, ipaddr, ntohs(SIN_PORT(addr)));
+	hexdump(buffer, len);
 
 	if (len < CAPWAP_HEADER_LEN)
 		return;
@@ -317,22 +319,22 @@ static void capwap_recv(struct worker *w, struct msghdr *msg, unsigned char *buf
 		struct ether_header *ether;
 		uint16_t fc = le_to_host16(hdr->frame_control);
 
-		fprintf(stderr, "FrameType: %04x", fc);
+		debug("FrameType: %04x", fc);
 
 		if (WLAN_FC_GET_TYPE(fc) == WLAN_FC_TYPE_MGMT) {
 			/* push mgmt to controller */
-			fprintf(stderr, "management frame\n");
+			debug("management frame\n");
 			return;
 		}
 		else if (WLAN_FC_GET_TYPE(fc) == WLAN_FC_TYPE_DATA &&
 			 (fc & (WLAN_FC_TODS | WLAN_FC_FROMDS)) == WLAN_FC_FROMDS) {
-			fprintf(stderr, "%lx: addr1: %02x:%02x:%02x:%02x:%02x:%02x\n", w->tid,
+			debug("%lx: addr1: %02x:%02x:%02x:%02x:%02x:%02x\n", w->tid,
 				hdr->addr1[0], hdr->addr1[1], hdr->addr1[2],
 				hdr->addr1[3], hdr->addr1[4], hdr->addr1[5]);
-			fprintf(stderr, "%lx: addr2: %02x:%02x:%02x:%02x:%02x:%02x\n", w->tid,
+			debug("%lx: addr2: %02x:%02x:%02x:%02x:%02x:%02x\n", w->tid,
 				hdr->addr2[0], hdr->addr2[1], hdr->addr2[2],
 				hdr->addr2[3], hdr->addr2[4], hdr->addr2[5]);
-			fprintf(stderr, "%lx: addr3: %02x:%02x:%02x:%02x:%02x:%02x\n", w->tid,
+			debug("%lx: addr3: %02x:%02x:%02x:%02x:%02x:%02x\n", w->tid,
 				hdr->addr3[0], hdr->addr3[1], hdr->addr3[2],
 				hdr->addr3[3], hdr->addr3[4], hdr->addr3[5]);
 
@@ -342,7 +344,7 @@ static void capwap_recv(struct worker *w, struct msghdr *msg, unsigned char *buf
 			forward_capwap(w, addr, ether, data + sizeof(struct ieee80211_hdr), datalen - sizeof(struct ieee80211_hdr));
 		} else {
 			/* wrong direction / unknown / unhandled WLAN frame - ignore */
-			fprintf(stderr, "ignoring: type %d, To/From %d\n", WLAN_FC_GET_TYPE(fc), (fc & (WLAN_FC_TODS | WLAN_FC_FROMDS)));
+			debug("ignoring: type %d, To/From %d\n", WLAN_FC_GET_TYPE(fc), (fc & (WLAN_FC_TODS | WLAN_FC_FROMDS)));
 			return;
 		}
 		break;
@@ -381,7 +383,7 @@ static void capwap_recv(struct worker *w, struct msghdr *msg, unsigned char *buf
 	rcu_read_unlock();
 
 	/* do whatever we want */
-	fprintf(stderr, "Clnt: %p, new: %d\n", clnt, !ht_node);
+	debug("Clnt: %p, new: %d\n", clnt, !ht_node);
 
 	if (!ht_node) {
 		/* send new data channel notify to controller */
@@ -424,7 +426,7 @@ static void capwap_read_error_q(struct worker *w, int fd)
 			/* Ip level */
 			if (cmsg->cmsg_level == SOL_IP &&
 			    cmsg->cmsg_type == IP_RECVERR) {
-				fprintf(stderr, "We got IP_RECVERR message (msg_name: %p)\n", msg.msg_name);
+				debug("We got IP_RECVERR message (msg_name: %p)\n", msg.msg_name);
 				sock_err = (struct sock_extended_err*)CMSG_DATA(cmsg);
 
 /*
@@ -438,24 +440,24 @@ static void capwap_read_error_q(struct worker *w, int fd)
 					switch (sock_err->ee_type) {
 					case ICMP_NET_UNREACH:
 						/* Handle this error */
-						fprintf(stderr, "Network Unreachable Error\n");
+						debug("Network Unreachable Error\n");
 						break;
 
 					case ICMP_HOST_UNREACH:
 						/* Handle this error */
-						fprintf(stderr, "Host Unreachable Error\n");
+						debug("Host Unreachable Error\n");
 						break;
 
 					case ICMP_PORT_UNREACH:
 						/* Handle this error */
-						fprintf(stderr, "Port Unreachable Error\n");
+						debug("Port Unreachable Error\n");
 						break;
 
 					default:
 						/* Handle all other cases. Find more errors :
 						 * http://lxr.linux.no/linux+v3.5/include/linux/icmp.h#L39
 						 */
-						fprintf(stderr, "got Error %d\n", sock_err->ee_type);
+						debug("got Error %d\n", sock_err->ee_type);
 						break;
 					}
 				}
@@ -478,7 +480,7 @@ static void capwap_cb(EV_P_ ev_io *ev, int revents)
 
 	struct worker *w = ev_userdata (EV_A);
 
-	fprintf(stderr, "%lx: read (%x) from %d\n", w->tid, revents, ev->fd);
+	debug("%lx: read (%x) from %d\n", w->tid, revents, ev->fd);
 
 	memset(msgs, 0, sizeof(msgs));
 	for (i = 0; i < VLEN; i++) {
@@ -497,9 +499,9 @@ static void capwap_cb(EV_P_ ev_io *ev, int revents)
 		return;
 	}
 
-	fprintf(stderr, "%lx(%u): %zd CAPWAP messages received\n", w->tid, w->id, r);
+	debug("%lx(%u): %zd CAPWAP messages received\n", w->tid, w->id, r);
 	for (i = 0; i < r; i++) {
-		fprintf(stderr, "flags: %d\n", msgs[i].msg_hdr.msg_flags);
+		debug("flags: %d\n", msgs[i].msg_hdr.msg_flags);
 		capwap_recv(w, &msgs[i].msg_hdr, bufs[i], msgs[i].msg_len);
 	}
 
@@ -511,10 +513,10 @@ static void tap_multicast(struct worker *w, unsigned char *buffer, ssize_t len)
 {
 	struct ether_header *ether = (struct ether_header *)buffer;
 
-	fprintf(stderr, "%lx: dst mcast ether: %d, %02x:%02x:%02x:%02x:%02x:%02x\n", w->tid, ether->ether_dhost[0] & 0x01,
+	debug("%lx: dst mcast ether: %d, %02x:%02x:%02x:%02x:%02x:%02x\n", w->tid, ether->ether_dhost[0] & 0x01,
 		ether->ether_dhost[0], ether->ether_dhost[1], ether->ether_dhost[2],
 		ether->ether_dhost[3], ether->ether_dhost[4], ether->ether_dhost[5]);
-	fprintf(stderr, "%lx: ether mcast type: %04x\n", w->tid, ntohs(ether->ether_type));
+	debug("%lx: ether mcast type: %04x\n", w->tid, ntohs(ether->ether_type));
 
 	packet_in_tap(buffer, len);
 }
@@ -527,10 +529,10 @@ static void tap_unicast(struct worker *w, unsigned char *buffer, ssize_t len)
 	struct msghdr mh;
 	struct ether_header *ether = (struct ether_header *)buffer;
 
-	fprintf(stderr, "%lx: dst unicast ether: %d, %02x:%02x:%02x:%02x:%02x:%02x\n", w->tid, ether->ether_dhost[0] & 0x01,
+	debug("%lx: dst unicast ether: %d, %02x:%02x:%02x:%02x:%02x:%02x\n", w->tid, ether->ether_dhost[0] & 0x01,
 		ether->ether_dhost[0], ether->ether_dhost[1], ether->ether_dhost[2],
 		ether->ether_dhost[3], ether->ether_dhost[4], ether->ether_dhost[5]);
-	fprintf(stderr, "%lx: ether unicast type: %04x\n", w->tid, ntohs(ether->ether_type));
+	debug("%lx: ether unicast type: %04x\n", w->tid, ntohs(ether->ether_type));
 
 	rcu_read_lock();
 
@@ -567,10 +569,10 @@ static void tap_unicast(struct worker *w, unsigned char *buffer, ssize_t len)
 		mh.msg_iovlen = 2;
 
 		r = sendmsg(w->capwap_fd, &mh, MSG_DONTWAIT);
-		fprintf(stderr, "%lx: fwd tap sendmsg: %zd\n", w->tid, r);
+		debug("%lx: fwd tap sendmsg: %zd\n", w->tid, r);
 
 
-		fprintf(stderr, "%lx: found STA %p, WTP %p\n", w->tid, sta, sta->wtp);
+		debug("%lx: found STA %p, WTP %p\n", w->tid, sta, sta->wtp);
 	} else
 		packet_in_tap(buffer, len);
 
@@ -584,13 +586,13 @@ static void tap_cb(EV_P_ ev_io *ev, int revents)
 	int cnt = 10;
 	struct worker *w = ev_userdata (EV_A);
 
-	fprintf(stderr, "%lx: read from %d\n", w->tid, ev->fd);
+	debug("%lx: read from %d\n", w->tid, ev->fd);
 
 	while (cnt > 0 && (r = read(ev->fd, buffer, sizeof(buffer))) > 0) {
 		struct ether_header *ether = (struct ether_header *)&buffer;
 
-		fprintf(stderr, "%lx: read %zd bytes\n", w->tid, r);
-//		hexdump(stderr, buffer, r);
+		debug("%lx: read %zd bytes\n", w->tid, r);
+//		hexdump(buffer, r);
 
 		if (r >= sizeof(struct ether_header)) {
 			if ((ether->ether_dhost[0] & 0x01) != 0)
@@ -655,7 +657,7 @@ int tap_alloc(char *dev)
 	}
 	strcpy(dev, ifr.ifr_name);
 
-	fprintf(stderr, "allocated TAP device %s\n", dev);
+	debug("allocated TAP device %s\n", dev);
 	return fd;
 }
 
@@ -669,9 +671,9 @@ void set_if_addr(const char *dev)
 	else
 		snprintf(cmd, sizeof(cmd), "/sbin/ifconfig %s 192.168.240.0 netmask 255.255.255.0 up", dev);
 
-	fprintf(stderr, "cmd: '%s'\n", cmd);
+	debug("cmd: '%s'\n", cmd);
 	if ((r = system(cmd)) < 0)
-		fprintf(stderr, "failed with : '%m'\n");
+		debug("failed with : '%m'\n");
 }
 
 static void *worker_thread(void *arg)
@@ -747,7 +749,7 @@ static void *worker_thread(void *arg)
 	ev_set_userdata(w->loop, w);
 	ev_set_loop_release_cb(w->loop, ev_unlock, ev_lock);
 
-	fprintf(stderr, "worker %lx running\n", w->tid);
+	debug("worker %lx running\n", w->tid);
 
 	ev_lock(w->loop);
 	pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, 0);
@@ -757,7 +759,7 @@ static void *worker_thread(void *arg)
 	ev_loop_destroy(w->loop);
 	rcu_unregister_thread();
 
-	fprintf(stderr, "worker %lx exited\n", w->tid);
+	debug("worker %lx exited\n", w->tid);
 
 	return NULL;
 }

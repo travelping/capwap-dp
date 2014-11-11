@@ -13,9 +13,10 @@
 #include <stdio.h>
 #include <inttypes.h>
 #include <errno.h>
+#include <sys/mman.h>
 #include <sys/queue.h>
-#include <sys/time.h>
 #include <sys/resource.h>
+#include <sys/time.h>
 #include <arpa/inet.h>
 #include <getopt.h>
 
@@ -747,6 +748,23 @@ static void control_unlock(EV_P)
 	pthread_mutex_unlock (&c->loop_lock);
 }
 
+static int set_realtime_priority(void) {
+	struct sched_param schp;
+
+        /*
+         * set the process to realtime privs
+         */
+        memset(&schp, 0, sizeof(schp));
+        schp.sched_priority = sched_get_priority_max(SCHED_FIFO);
+
+        if (sched_setscheduler(0, SCHED_FIFO, &schp) != 0) {
+                perror("sched_setscheduler");
+                return -1;
+        }
+
+        return 0;
+}
+
 static void usage(void)
 {
         printf("TPLINO CAPWAP Data Path Deamon, Version: .....\n\n"
@@ -866,6 +884,13 @@ int main(int argc, char *argv[])
                         printf("?? getopt returned character code 0%o ??\n", c);
                 }
         }
+
+
+	if (mlockall(MCL_CURRENT|MCL_FUTURE))
+		perror("mlockall() failed");
+
+	if (set_realtime_priority() < 0)
+		fprintf(stderr, "can't get realtime priority, run capwap-dp as root.\n");
 
 	/*
 	 * Each thread need using RCU read-side need to be explicitly
