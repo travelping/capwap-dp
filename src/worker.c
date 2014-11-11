@@ -259,6 +259,9 @@ static void forward_capwap(struct worker *w, struct sockaddr *addr, struct ether
 	iov[1].iov_base = data;
 	iov[1].iov_len = len;
 
+	hexdump(stderr, iov[0].iov_base, iov[0].iov_len);
+	hexdump(stderr, iov[1].iov_base, iov[1].iov_len);
+
 	r = writev(w->tap_fd, iov, 2);
 	fprintf(stderr, "%lx: fwd CW writev: %d\n", w->tid, r);
 
@@ -283,13 +286,14 @@ static void capwap_recv(struct worker *w, struct msghdr *msg, unsigned char *buf
 	if (len < CAPWAP_HEADER_LEN)
 		return;
 
-	hlen = GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_HLEN_MASK, CAPWAP_HLEN_SHIFT);
+	hlen = GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_HLEN_MASK, CAPWAP_HLEN_SHIFT) * 4;
 	if (len < hlen)
 		return;
 
-	if (GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_F_K, 0))
-		/* FIXME: Keep-Alive */
+	if (GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_F_K, 0)) {
+		capwap_in_keep_alive(addr, buffer, len);
 		return;
+	}
 
 	if (GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_F_FRAG, 0))
 		/* FIXME: no fragmentation support (yet) */
@@ -420,8 +424,15 @@ static void capwap_read_error_q(struct worker *w, int fd)
 			/* Ip level */
 			if (cmsg->cmsg_level == SOL_IP &&
 			    cmsg->cmsg_type == IP_RECVERR) {
-				fprintf(stderr, "We got IP_RECVERR message\n");
+				fprintf(stderr, "We got IP_RECVERR message (msg_name: %p)\n", msg.msg_name);
 				sock_err = (struct sock_extended_err*)CMSG_DATA(cmsg);
+
+/*
+				if (sock_err) capwap_socket_error(sock_err->ee_origin,
+								  sock_err->ee_type,
+								  msg.msg_name);
+*/
+
 				if (sock_err && sock_err->ee_origin == SO_EE_ORIGIN_ICMP) {
 					/* Handle ICMP errors types */
 					switch (sock_err->ee_type) {
@@ -461,7 +472,7 @@ static void capwap_cb(EV_P_ ev_io *ev, int revents)
 #define BUFSIZE 2048
 
 	struct mmsghdr msgs[VLEN];
-	struct sockaddr addrs[VLEN];
+	struct sockaddr_storage addrs[VLEN];
 	struct iovec iovecs[VLEN];
 	unsigned char bufs[VLEN][BUFSIZE];
 
@@ -472,7 +483,7 @@ static void capwap_cb(EV_P_ ev_io *ev, int revents)
 	memset(msgs, 0, sizeof(msgs));
 	for (i = 0; i < VLEN; i++) {
 		msgs[i].msg_hdr.msg_name    = &addrs[i];
-		msgs[i].msg_hdr.msg_namelen = sizeof(struct sockaddr);
+		msgs[i].msg_hdr.msg_namelen = sizeof(struct sockaddr_storage);
 		iovecs[i].iov_base          = bufs[i];
 		iovecs[i].iov_len           = BUFSIZE;
 		msgs[i].msg_hdr.msg_iov     = &iovecs[i];
@@ -481,12 +492,8 @@ static void capwap_cb(EV_P_ ev_io *ev, int revents)
 
 	r = recvmmsg(ev->fd, msgs, VLEN, MSG_DONTWAIT, NULL);
 	if (r < 0) {
-		if (errno == EAGAIN) {
-			/* can read, but got no data, must be something in the error queue */
-			capwap_read_error_q(w, ev->fd);
-			return;
-		}
-		perror("read");
+		perror("recvmmsg");
+		capwap_read_error_q(w, ev->fd);
 		return;
 	}
 
@@ -502,13 +509,14 @@ static void capwap_cb(EV_P_ ev_io *ev, int revents)
 
 static void tap_multicast(struct worker *w, unsigned char *buffer, ssize_t len)
 {
-//	struct ether_header *ether = (struct ether_header *)buffer;
-/*
+	struct ether_header *ether = (struct ether_header *)buffer;
+
 	fprintf(stderr, "%lx: dst mcast ether: %d, %02x:%02x:%02x:%02x:%02x:%02x\n", w->tid, ether->ether_dhost[0] & 0x01,
 		ether->ether_dhost[0], ether->ether_dhost[1], ether->ether_dhost[2],
 		ether->ether_dhost[3], ether->ether_dhost[4], ether->ether_dhost[5]);
 	fprintf(stderr, "%lx: ether mcast type: %04x\n", w->tid, ntohs(ether->ether_type));
-*/
+
+	packet_in_tap(buffer, len);
 }
 
 static void tap_unicast(struct worker *w, unsigned char *buffer, ssize_t len)
@@ -529,18 +537,23 @@ static void tap_unicast(struct worker *w, unsigned char *buffer, ssize_t len)
 	if ((sta = find_station(ether->ether_dhost)) != NULL) {
 		/* queue packet to WTP */
 
+		unsigned int hlen;
 		unsigned char chdr[32];
 
 		memset(chdr, 0, sizeof(chdr));
 
+		hlen = 2;
+
 		/* Version = 0, Type = 0, HLen = 8, RId = 1, no WBID, 802.3 encoding */
-		((uint32_t *)chdr)[0] = htobe32((8 << CAPWAP_HLEN_SHIFT) | (1 < CAPWAP_RID_SHIFT));
+		((uint32_t *)chdr)[0] = htobe32((hlen << CAPWAP_HLEN_SHIFT) | (1 < CAPWAP_RID_SHIFT));
 
 		/* Frag Id = 0, Frag Offset = 0 */
 		/* no RADIO MAC */
 		/* no WSI */
 
-		/* FIXME: shortcat write */
+		/* FIXME: shortcat write, we do want to use NON-BLOCKING send here and
+		 *        switch to write_ev should it block....
+		 */
 		iov[0].iov_base = chdr;
 		iov[0].iov_len = 8;
 		iov[1].iov_base = buffer;
@@ -553,12 +566,13 @@ static void tap_unicast(struct worker *w, unsigned char *buffer, ssize_t len)
 		mh.msg_iov = iov;
 		mh.msg_iovlen = 2;
 
-		r = sendmsg(w->capwap_fd, &mh, 0);
+		r = sendmsg(w->capwap_fd, &mh, MSG_DONTWAIT);
 		fprintf(stderr, "%lx: fwd tap sendmsg: %zd\n", w->tid, r);
 
 
 		fprintf(stderr, "%lx: found STA %p, WTP %p\n", w->tid, sta, sta->wtp);
-	}
+	} else
+		packet_in_tap(buffer, len);
 
 	rcu_read_unlock();
 }
@@ -663,11 +677,10 @@ void set_if_addr(const char *dev)
 static void *worker_thread(void *arg)
 {
 	int on = 1;
-        struct sockaddr_in addr = {
-		.sin_family = AF_INET,
-		.sin_port = htons(capwap_port),
-		.sin_addr.s_addr = htonl(INADDR_ANY)
-	};
+	int domain;
+
+        struct sockaddr_storage saddr;
+	ssize_t saddr_len;
 	struct worker *w = (struct worker *)arg;
 
 	/*
@@ -676,10 +689,29 @@ static void *worker_thread(void *arg)
 	 */
 	rcu_register_thread();
 
+	memset(&saddr, 0, sizeof(saddr));
+	if (v4only) {
+		struct sockaddr_in *addr = (struct sockaddr_in *)&saddr;
+
+		domain = AF_INET;
+		addr->sin_family = AF_INET;
+		addr->sin_port = htons(capwap_port);
+		addr->sin_addr.s_addr = htonl(INADDR_ANY);
+		saddr_len = sizeof(struct sockaddr_in);
+	} else {
+		struct sockaddr_in6 *addr = (struct sockaddr_in6 *)&saddr;
+
+		domain = AF_INET6;
+		addr->sin6_family = AF_INET6;
+		addr->sin6_port = htons(capwap_port);
+		// addr->sin6_addr = IN6ADDR_ANY;
+		saddr_len = sizeof(struct sockaddr_in6);
+	}
+
 	if (capwap_ns_fd)
-		w->capwap_fd = socket_ns(capwap_ns_fd, AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+		w->capwap_fd = socket_ns(capwap_ns_fd, domain, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
 	else
-		w->capwap_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+		w->capwap_fd = socket(domain, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
 
 	if (w->capwap_fd < 0) {
 		perror("socket");
@@ -688,9 +720,11 @@ static void *worker_thread(void *arg)
 
 	setsockopt(w->capwap_fd, SOL_SOCKET, SO_REUSEADDR, (char*)&on, sizeof(on));
 	setsockopt(w->capwap_fd, SOL_SOCKET, SO_REUSEPORT, (char*)&on, sizeof(on));
-	setsockopt(w->capwap_fd, SOL_IP, IP_RECVERR,(char*)&on, sizeof(on));
+	setsockopt(w->capwap_fd, SOL_IP, IP_RECVERR, (char*)&on, sizeof(on));
+	if (v6only)
+		setsockopt(w->capwap_fd, SOL_IP, IPV6_V6ONLY,(char*)&on, sizeof(on));
 
-	if (bind(w->capwap_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+	if (bind(w->capwap_fd, (struct sockaddr *)&saddr, saddr_len) < 0) {
 		perror("bind");
 		exit(EXIT_FAILURE);
 	}
@@ -747,7 +781,7 @@ int start_worker(size_t count)
 	if (capwap_ns)
 		capwap_ns_fd = get_nsfd(capwap_ns);
 	if (fwd_ns)
-		fwd_ns_fd = get_nsfd(capwap_ns);
+		fwd_ns_fd = get_nsfd(fwd_ns);
 
 	for (int i = 0; i < count; i++) {
 		workers[i].id = i;

@@ -7,6 +7,8 @@
 
 /* global setting, cmdline arguments */
 
+extern int v4only;
+extern int v6only;
 extern int capwap_port;
 extern const char *capwap_ns;
 extern const char *fwd_ns;
@@ -55,6 +57,8 @@ extern struct cds_lfht *ht_clients;	/* Hash table */
 #define SIN_ADDR_PTR(addr) ((((struct sockaddr *)(addr))->sa_family == AF_INET) ? (void *)&(((struct sockaddr_in *)(addr))->sin_addr) : (void *)&(((struct sockaddr_in6 *)(addr))->sin6_addr))
 #define SIN_PORT(addr) ((((struct sockaddr *)(addr))->sa_family == AF_INET) ? (((struct sockaddr_in *)(addr))->sin_port) : (((struct sockaddr_in6 *)(addr))->sin6_port))
 
+void packet_in_tap(const unsigned char *, ssize_t);
+void capwap_in_keep_alive(const struct sockaddr *, const unsigned char *, ssize_t);
 
 int start_worker(size_t);
 unsigned long hash_sockaddr(struct sockaddr *);

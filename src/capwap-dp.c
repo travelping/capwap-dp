@@ -21,6 +21,8 @@
 
 #include <urcu.h>               /* RCU flavor */
 #include <urcu/ref.h>		/* ref counting */
+#include <urcu/rculist.h>       /* RCU list */
+#include <urcu/rculfqueue.h>    /* RCU Lock-free queue */
 #include <urcu/rculfhash.h>	/* RCU Lock-free hash table */
 #include "jhash.h"
 
@@ -35,17 +37,33 @@
 static const char _ident[] = "capwap-dp v" VERSION;
 static const char _build[] = "build on " __DATE__ " " __TIME__ " with gcc " __VERSION__;
 
+struct control_loop {
+	struct ev_loop *loop;
+	pthread_mutex_t loop_lock; /* global loop lock */
+
+	int listen_fd;
+	ev_io control_ev;
+
+	struct cds_lfq_queue_rcu queue;
+	ev_async q_ev;
+};
+
+static struct control_loop ctrl;
+
 struct controller {
-	LIST_ENTRY(controller) controllers;
+        struct rcu_head rcu_head;       /* For call_rcu() */
+        struct cds_list_head controllers;
 
 	int fd;
 	ErlConnect conp;
 
 	ev_io ev_read;
 	// write_lock
+
+	ETERM *bind_pid;
 };
 
-LIST_HEAD(controllers, controller) controllers = LIST_HEAD_INITIALIZER(controllers);
+CDS_LIST_HEAD(controllers);
 static ei_cnode ec;
 
 static int ipv4sockaddr(ETERM *ip, unsigned int port, struct sockaddr_in *addr)
@@ -62,6 +80,27 @@ static int ipv4sockaddr(ETERM *ip, unsigned int port, struct sockaddr_in *addr)
 	addr->sin_family = AF_INET;
 	addr->sin_port = htons(port);
 	addr->sin_addr.s_addr = htonl(a);
+
+	return 1;
+}
+
+static int ipv6_v4mappedsockaddr(ETERM *ip, unsigned int port, struct sockaddr_in6 *addr)
+{
+	uint32_t a = 0;
+
+	for (int i = 0; i < 4; i++) {
+		ETERM *n = erl_element(i+1, ip);
+		a = a << 8;
+		a |= ERL_INT_UVALUE(n);
+		erl_free_term(n);
+	}
+
+	addr->sin6_family = AF_INET6;
+	addr->sin6_port = htons(port);
+	addr->sin6_addr.s6_addr32[0] = 0;
+	addr->sin6_addr.s6_addr32[1] = 0;
+	addr->sin6_addr.s6_addr32[2] = htonl(0xffff);
+	addr->sin6_addr.s6_addr32[3] = htonl(a);
 
 	return 1;
 }
@@ -94,7 +133,10 @@ static int tuple2sockaddr(ETERM *ea, struct sockaddr_storage *addr)
 	if (ERL_IS_INTEGER(port))
 		switch (ERL_TUPLE_SIZE(ip)) {
 		case 4:
-			res = ipv4sockaddr(ip, ERL_INT_UVALUE(port), (struct sockaddr_in *)addr);
+			if (!v4only)
+				res = ipv6_v4mappedsockaddr(ip, ERL_INT_UVALUE(port), (struct sockaddr_in6 *)addr);
+			else
+				res = ipv4sockaddr(ip, ERL_INT_UVALUE(port), (struct sockaddr_in *)addr);
 			break;
 
 		case 8:
@@ -110,7 +152,7 @@ out:
 	return res;
 }
 
-ETERM *sockaddr2term(struct sockaddr *addr)
+ETERM *sockaddr2term(const struct sockaddr *addr)
 {
 	char ipaddr[INET6_ADDRSTRLEN];
 	ETERM *eaddr[2];
@@ -126,20 +168,29 @@ ETERM *sockaddr2term(struct sockaddr *addr)
 
 		for (int i = 0; i < 4; i++)
 			ip[i] = erl_mk_int(a[i]);
-
 		eaddr[0] = erl_mk_tuple(ip, 4);
 		eaddr[1] = erl_mk_int(ntohs(in->sin_port));
 
 		break;
 	}
+
 	case AF_INET6: {
-		ETERM *ip[8];
 		struct sockaddr_in6 *in6 = (struct sockaddr_in6 *)addr;
 
-		for (int i = 0; i < 8; i++)
-			ip[i] = erl_mk_int(ntohs(in6->sin6_addr.s6_addr16[i]));
+		if (IN6_IS_ADDR_V4MAPPED(&in6->sin6_addr)) {
+			uint8_t *a = (uint8_t *)&in6->sin6_addr.s6_addr32[3];
+			ETERM *ip[4];
 
-		eaddr[0] = erl_mk_tuple(ip, 8);
+			for (int i = 0; i < 4; i++)
+				ip[i] = erl_mk_int(a[i]);
+			eaddr[0] = erl_mk_tuple(ip, 4);
+		} else {
+			ETERM *ip[8];
+
+			for (int i = 0; i < 8; i++)
+				ip[i] = erl_mk_int(ntohs(in6->sin6_addr.s6_addr16[i]));
+			eaddr[0] = erl_mk_tuple(ip, 8);
+		}
 		eaddr[1] = erl_mk_int(ntohs(in6->sin6_port));
 
 		break;
@@ -186,7 +237,7 @@ ETERM *wtp2term(struct client *clnt)
 	return erl_mk_tuple(wtp, 3);
 }
 
-static void async_reply(int fd, ETERM *from, ETERM *resp)
+static void async_reply(struct controller *cnt, ETERM *from, ETERM *resp)
 {
 	ETERM *pid, *m;
 	ETERM *marr[2];
@@ -198,12 +249,36 @@ static void async_reply(int fd, ETERM *from, ETERM *resp)
 	marr[1] = resp;
 	m = erl_mk_tuple(marr, 2);
 
-	erl_send(fd, pid, m);
+	erl_send(cnt->fd, pid, m);
+}
+
+static void cnt_send(struct controller *cnt, ETERM *term)
+{
+	if (cnt->bind_pid)
+		erl_send(cnt->fd, cnt->bind_pid, term);
+}
+
+static ETERM *erl_bind(struct controller *cnt, ETERM *tuple)
+{
+	ETERM *pid;
+
+	if (cnt->bind_pid) {
+		erl_free_term(cnt->bind_pid);
+		cnt->bind_pid = NULL;
+	}
+
+	pid = erl_element(2, tuple);
+	if (ERL_IS_PID(pid))
+		cnt->bind_pid = erl_copy_term(pid);
+
+	erl_free_term(pid);
+
+	return erl_mk_atom("ok");
 }
 
 static ETERM *erl_send_to(ETERM *tuple)
 {
-	ETERM *res, *msg;
+	ETERM *msg;
 	ssize_t r;
 	struct client *clnt;
 	char ipaddr[INET6_ADDRSTRLEN];
@@ -416,10 +491,13 @@ static ETERM *erl_detach_station(ETERM *tuple)
 	return res;
 }
 
-static ETERM *handle_gen_call_capwap(const char *fn, ETERM *tuple)
+static ETERM *handle_gen_call_capwap(struct controller *cnt, const char *fn, ETERM *tuple)
 {
 	if (strncmp(fn, "sendto", 6) == 0) {
 		return erl_send_to(tuple);
+	}
+	if (strncmp(fn, "bind", 4) == 0) {
+		return erl_bind(cnt, tuple);
 	}
 	if (strncmp(fn, "add_wtp", 7) == 0) {
 		return erl_add_wtp(tuple);
@@ -443,7 +521,7 @@ static ETERM *handle_gen_call_capwap(const char *fn, ETERM *tuple)
 		return erl_mk_atom("error");
 }
 
-static void handle_gen_call(int fd, const char *to, ETERM *from, ETERM *tuple)
+static void handle_gen_call(struct controller *cnt, const char *to, ETERM *from, ETERM *tuple)
 {
 	ETERM *fn;
 	ETERM *resp;
@@ -455,18 +533,18 @@ static void handle_gen_call(int fd, const char *to, ETERM *from, ETERM *tuple)
 		resp = erl_mk_atom("yes");
 	}
 	else if (strncmp(to, "capwap", 6) == 0) {
-		resp = handle_gen_call_capwap(ERL_ATOM_PTR(fn), tuple);
+		resp = handle_gen_call_capwap(cnt, ERL_ATOM_PTR(fn), tuple);
 	}
 	else
 		resp = erl_mk_atom("error");
 
-	async_reply(fd, from, resp);
+	async_reply(cnt, from, resp);
 
 	erl_free_term(fn);
 	erl_free_term(resp);
 }
 
-static void handle_gen_cast(int fd, ETERM *cast)
+static void handle_gen_cast(struct controller *cnt, ETERM *cast)
 {
 }
 
@@ -485,6 +563,7 @@ static void erl_read_cb(EV_P_ ev_io *w, int revents)
 		close(w->fd);
 		ev_io_stop (EV_A_ w);
 	} else {
+		struct controller *cnt = caa_container_of(w, struct controller, ev_read);
 		int index = 0;
 
 		switch (msg.msgtype) {
@@ -503,7 +582,7 @@ static void erl_read_cb(EV_P_ ev_io *w, int revents)
 
 				from = erl_element(2, fmsg);
 				call = erl_element(3, fmsg);
-				handle_gen_call(w->fd, msg.toname, from, call);
+				handle_gen_call(cnt, msg.toname, from, call);
 				erl_free_term(from);
 				erl_free_term(call);
 			}
@@ -511,7 +590,7 @@ static void erl_read_cb(EV_P_ ev_io *w, int revents)
 				ETERM *cast;
 
 				cast = erl_element(2, fmsg);
-				handle_gen_cast(w->fd, cast);
+				handle_gen_cast(cnt, cast);
 				erl_free_term(cast);
 			}
 
@@ -548,7 +627,124 @@ static void control_cb(EV_P_ ev_io *w, int revents)
 	ev_io_init(&cnt->ev_read, erl_read_cb, cnt->fd, EV_READ);
 	ev_io_start(EV_A_ &cnt->ev_read);
 
-	LIST_INSERT_HEAD(&controllers, cnt, controllers);
+	cds_list_add_rcu(&cnt->controllers, &controllers);
+}
+
+struct cq_node {
+	ETERM *term;
+
+	struct cds_lfq_node_rcu node;
+        struct rcu_head rcu_head;       /* For call_rcu() */
+};
+
+static void free_qnode(struct rcu_head *head)
+{
+        struct cq_node *node = caa_container_of(head, struct cq_node, rcu_head);
+
+	erl_free_term(node->term);
+        free(node);
+}
+
+static void control_enqueue(ETERM *term)
+{
+	struct cq_node *cq;
+
+	cq = calloc(1, sizeof(struct cq_node));
+	if (!cq)
+		return;
+
+	cds_lfq_node_init_rcu(&cq->node);
+	cq->term = term;
+
+	/*
+	 * Both enqueue and dequeue need to be called within RCU
+	 * read-side critical section.
+	 */
+	rcu_read_lock();
+	cds_lfq_enqueue_rcu(&ctrl.queue, &cq->node);
+	rcu_read_unlock();
+
+	ev_async_send(ctrl.loop, &ctrl.q_ev);
+}
+
+static void q_cb(EV_P_ ev_async *ev, int revents)
+{
+	struct control_loop *w = ev_userdata(EV_A);
+
+        for (;;) {
+                struct cds_lfq_node_rcu *qnode;
+		struct cq_node *cq;
+		struct controller *cnt;
+
+                /*
+                 * Both enqueue and dequeue need to be called within RCU
+                 * read-side critical section.
+                 */
+                rcu_read_lock();
+                qnode = cds_lfq_dequeue_rcu(&w->queue);
+                rcu_read_unlock();
+                if (!qnode) {
+                        break;  /* Queue is empty. */
+                }
+
+                /* Getting the container structure from the node */
+                cq = caa_container_of(qnode, struct cq_node, node);
+
+		/*
+		 * we don't need RCU protection here, no one else can access the list
+		 */
+		cds_list_for_each_entry_rcu(cnt, &controllers, controllers) {
+			cnt_send(cnt, cq->term);
+		}
+
+                call_rcu(&cq->rcu_head, free_qnode);
+        }
+}
+
+void capwap_socket_error(int origin, int type, const struct sockaddr *addr)
+{
+	ETERM *msg[4];
+
+	msg[0] = erl_mk_atom("capwap_error");
+	msg[1] = erl_mk_int(origin);
+	msg[2] = erl_mk_int(type);
+	msg[3] = sockaddr2term(addr);
+
+	control_enqueue(erl_mk_tuple(msg, 4));
+}
+
+void capwap_in_keep_alive(const struct sockaddr *addr, const unsigned char *buf, ssize_t len)
+{
+	ETERM *msg[3];
+
+	msg[0] = erl_mk_atom("capwap_in");
+	msg[1] = sockaddr2term(addr);
+	msg[2] = erl_mk_binary((char *)buf, len);
+
+	control_enqueue(erl_mk_tuple(msg, 3));
+}
+
+void packet_in_tap(const unsigned char *buf, ssize_t len)
+{
+	ETERM *msg[3];
+
+	msg[0] = erl_mk_atom("packet_in");
+	msg[1] = erl_mk_atom("tap");
+	msg[2] = erl_mk_binary((char *)buf, len);
+
+	control_enqueue(erl_mk_tuple(msg, 3));
+}
+
+static void control_lock(EV_P)
+{
+	struct control_loop *c = ev_userdata (EV_A);
+	pthread_mutex_lock(&c->loop_lock);
+}
+
+static void control_unlock(EV_P)
+{
+	struct control_loop *c = ev_userdata(EV_A);
+	pthread_mutex_unlock (&c->loop_lock);
 }
 
 static void usage(void)
@@ -559,6 +755,8 @@ static void usage(void)
                "  -h                                this help\n"
 //               "  --dist=IP                         bind Erlang cluster protocol to interface\n"
                "  --sname=NAME                      Erlang node short name\n"
+               "  -4, --v4only                      CAPWAP IPv4 only socket\n"
+               "  -6, --v6only                      CAPWAP IPv6 only socket\n"
 	       "  -p, --port=PORT                   bind CAPWAP to PORT (default 5247)\n"
 //               "  -i, --bind=BIND                   bind CAPWAP to IP\n"
 	       "  -n, --netns=NAMESPACE             open CAPWAP socket in namespace\n"
@@ -568,6 +766,8 @@ static void usage(void)
         exit(EXIT_SUCCESS);
 }
 
+int v4only = 0;
+int v6only = 0;
 int capwap_port = 5247;
 const char *capwap_ns = NULL;
 const char *fwd_ns = NULL;
@@ -585,13 +785,11 @@ int main(int argc, char *argv[])
 		.sin_port = 0,
 		.sin_addr.s_addr = htonl(INADDR_ANY)
 	};
-	struct ev_loop *loop = EV_DEFAULT;
+
 	int on = 1;
 
         int c;
 	socklen_t slen;
-	int control_fd;
-	ev_io control_ev;
 
         /* unlimited size for cores */
         setrlimit(RLIMIT_CORE, &rlim);
@@ -600,13 +798,16 @@ int main(int argc, char *argv[])
                 int option_index = 0;
                 static struct option long_options[] = {
                         {"sname",         1, 0, 1024},
+                        {"v4only",        0, 0, '4'},
+                        {"v6only",        0, 0, '6'},
                         {"forward-netns", 1, 0, 'f'},
                         {"netns",         1, 0, 'n'},
                         {"port",          1, 0, 'p'},
+                        {"v4only",        0, 0, '4'},
                         {0, 0, 0, 0}
                 };
 
-                c = getopt_long(argc, argv, "hi:f:n:",
+                c = getopt_long(argc, argv, "h46i:f:n:p:",
                                 long_options, &option_index);
                 if (c == -1)
                         break;
@@ -618,6 +819,22 @@ int main(int argc, char *argv[])
 
 		case 1024:
 			sname = strdup(optarg);
+			break;
+
+                case '4':
+			if (v6only) {
+                                fprintf(stderr, "v4only and v6only can not be used together\n");
+                                exit(EXIT_FAILURE);
+			}
+			v4only = 1;
+			break;
+
+                case '6':
+			if (v4only) {
+                                fprintf(stderr, "v4only and v6only can not be used together\n");
+                                exit(EXIT_FAILURE);
+			}
+			v6only = 1;
 			break;
 
 /*
@@ -656,21 +873,33 @@ int main(int argc, char *argv[])
 	 */
 	rcu_register_thread();
 
+	pthread_mutex_init(&ctrl.loop_lock, 0);
+
+	ctrl.loop = EV_DEFAULT;
+	cds_lfq_init_rcu(&ctrl.queue, call_rcu);
+
+	// now associate this with the loop
+	ev_set_userdata(ctrl.loop, &ctrl);
+	ev_set_loop_release_cb(ctrl.loop, control_unlock, control_lock);
+
+	ev_async_init(&ctrl.q_ev, q_cb);
+	ev_async_start(ctrl.loop, &ctrl.q_ev);
+
 	init_netns();
 	erl_init(NULL, 0);
 
-	if ((control_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)) < 0)
+	if ((ctrl.listen_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)) < 0)
 		exit(EXIT_FAILURE);
 
-	setsockopt(control_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+	setsockopt(ctrl.listen_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
 
-	if (bind(control_fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
+	if (bind(ctrl.listen_fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
 		printf("error bind: %m\n");
 		exit(EXIT_FAILURE);
 	}
 
 	slen = sizeof(addr);
-	if (getsockname(control_fd, (struct sockaddr *)&addr, &slen) < 0) {
+	if (getsockname(ctrl.listen_fd, (struct sockaddr *)&addr, &slen) < 0) {
 		printf("error getsockname: %m\n");
 		exit(EXIT_FAILURE);
 	}
@@ -685,15 +914,18 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	listen(control_fd, 5);
+	listen(ctrl.listen_fd, 5);
 
-	ev_io_init(&control_ev, control_cb, control_fd, EV_READ);
-	ev_io_start(loop, &control_ev);
+	ev_io_init(&ctrl.control_ev, control_cb, ctrl.listen_fd, EV_READ);
+	ev_io_start(ctrl.loop, &ctrl.control_ev);
 
 	start_worker(8);
 
-	printf("starting loop\n");
-	ev_run(loop, 0);
+	fprintf(stderr, "starting loop\n");
+	control_lock(ctrl.loop);
+	pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, 0);
+	ev_run(ctrl.loop, 0);
+	control_unlock(ctrl.loop);
 
         return 0;
 }
