@@ -779,6 +779,71 @@ static int set_realtime_priority(void) {
         return 0;
 }
 
+int node_name_long = 0;
+static char *node_name = NULL;
+
+static void dp_erl_connect(struct sockaddr_in *addr)
+{
+	char *p;
+	char thishostname[EI_MAXHOSTNAMELEN];
+	char thisalivename[EI_MAXHOSTNAMELEN];
+	char thisnodename[EI_MAXHOSTNAMELEN];
+	struct hostent *hp;
+
+	strncpy(thisalivename, node_name, sizeof(thishostname));
+	p = strchr(thisalivename, '@');
+	if (p) {
+		*p = '\0';
+		strncpy(thishostname, p + 1, sizeof(thishostname));
+		strncpy(thisnodename, node_name, sizeof(thishostname));
+	} else {
+		if (gethostname(thishostname, sizeof(thishostname)) < 0) {
+			perror("gethostname");
+			exit(EXIT_FAILURE);
+		}
+
+		if ((hp = gethostbyname(thishostname)) == 0) {
+			/* Looking up IP given hostname fails. We must be on a standalone
+			   host so let's use loopback for communication instead. */
+			if ((hp = gethostbyname("localhost")) == 0) {
+				perror("gethostbyname");
+				exit(EXIT_FAILURE);
+			}
+		}
+
+		fprintf(stderr, "thishostname: %s, hp->h_name: '%s'\n", thishostname, hp->h_name);
+		if (!node_name_long) {
+			char* ct;
+			if (strncmp(hp->h_name, "localhost", 9) == 0) {
+				/* We use a short node name */
+				if ((ct = strchr(thishostname, '.')) != NULL) *ct = '\0';
+				snprintf(thisnodename, sizeof(thisnodename), "%s@%s", thisalivename, thishostname);
+			} else {
+				/* We use a short node name */
+				if ((ct = strchr(hp->h_name, '.')) != NULL) *ct = '\0';
+				strcpy(thishostname, hp->h_name);
+				snprintf(thisnodename, sizeof(thisnodename), "%s@%s", thisalivename, hp->h_name);
+			}
+		} else
+			snprintf(thisnodename, sizeof(thisnodename), "%s@%s", thisalivename, hp->h_name);
+	}
+
+	fprintf(stderr, "thishostname:'%s'\n", thishostname);
+	fprintf(stderr, "thisalivename:'%s'\n", thisalivename);
+	fprintf(stderr, "thisnodename:'%s'\n", thisnodename);
+
+	if (ei_connect_xinit(&ec, thishostname, thisalivename, thisnodename,
+			     &addr->sin_addr, "cookie", 0) < 0) {
+		fprintf(stderr,"ERROR when initializing: %d",erl_errno);
+		exit(EXIT_FAILURE);
+	}
+
+	if (ei_publish(&ec, ntohs(addr->sin_port)) < 0) {
+		fprintf(stderr,"unable to register with EPMD: %d", erl_errno);
+		exit(EXIT_FAILURE);
+	}
+}
+
 static void usage(void)
 {
         printf("TPLINO CAPWAP Data Path Deamon, Version: .....\n\n"
@@ -804,8 +869,6 @@ int capwap_port = 5247;
 const char *capwap_ns = NULL;
 const char *fwd_ns = NULL;
 
-static const char *sname = "capwap-dp";
-
 int main(int argc, char *argv[])
 {
         const struct rlimit rlim = {
@@ -830,6 +893,7 @@ int main(int argc, char *argv[])
                 int option_index = 0;
                 static struct option long_options[] = {
                         {"sname",         1, 0, 1024},
+                        {"name",         1, 0, 1025},
                         {"v4only",        0, 0, '4'},
                         {"v6only",        0, 0, '6'},
                         {"forward-netns", 1, 0, 'f'},
@@ -850,7 +914,20 @@ int main(int argc, char *argv[])
                         break;
 
 		case 1024:
-			sname = strdup(optarg);
+			if (node_name) {
+                                fprintf(stderr, "--name and --sname can not be used together\n");
+                                exit(EXIT_FAILURE);
+			}
+			node_name = strdup(optarg);
+			break;
+
+		case 1025:
+			if (node_name) {
+                                fprintf(stderr, "--name and --sname can not be used together\n");
+                                exit(EXIT_FAILURE);
+			}
+			node_name = strdup(optarg);
+			node_name_long = 1;
 			break;
 
                 case '4':
@@ -899,6 +976,8 @@ int main(int argc, char *argv[])
                 }
         }
 
+	if (!node_name)
+		node_name = strdup("capwap-dp");
 
 	if (mlockall(MCL_CURRENT|MCL_FUTURE))
 		perror("mlockall() failed");
@@ -943,15 +1022,7 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	if (ei_connect_init(&ec, sname, "cookie", 0) < 0) {
-		fprintf(stderr,"ERROR when initializing: %d",erl_errno);
-		exit(EXIT_FAILURE);
-	}
-
-	if (ei_publish(&ec, ntohs(addr.sin_port)) < 0) {
-		fprintf(stderr,"unable to register with EPMD: %d", erl_errno);
-		exit(EXIT_FAILURE);
-	}
+	dp_erl_connect(&addr);
 
 	listen(ctrl.listen_fd, 5);
 
