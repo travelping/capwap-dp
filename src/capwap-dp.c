@@ -350,7 +350,15 @@ static ETERM *erl_add_wtp(ETERM *tuple)
 	 * critical section.
 	 */
 	rcu_read_lock();
+
+	/*
+	 * Mutating operations need mutal exclusion from each other,
+	 * only concurrent reads are allowed.
+	 * This is currently guaranteed since only the
+	 * control thread is permitted to call this.
+	 */
 	cds_lfht_add(ht_clients, hash, &clnt->node);
+
 	rcu_read_unlock();
 
 	return erl_mk_atom("ok");
@@ -453,6 +461,12 @@ static ETERM *erl_attach_station(ETERM *tuple)
 	cds_lfht_node_init(&sta->station_hash);
 	memcpy(&sta->ether, &ether, sizeof(ether));
 
+	/*
+	 * Mutating operations need mutal exclusion from each other,
+	 * only concurrent reads are allowed.
+	 * This is currently guaranteed since only the
+	 * control thread is permitted to call this.
+	 */
 	cds_lfht_add(ht_stations, hash, &sta->station_hash);
 	attach_station_to_wtp(clnt, sta);
 

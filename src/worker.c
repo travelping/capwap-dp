@@ -108,20 +108,37 @@ void attach_station_to_wtp(struct client *wtp, struct station *sta)
 	refcount_get_station(sta);
 	refcount_get_client(wtp);
 
-	cds_hlist_add_head_rcu(&sta->wtp_list, &wtp->stations);
 	sta->wtp = wtp;
+
+	/*
+	 * list mutating operations need mutal exclusion,
+	 * this is currently guaranteed since only the
+	 * control thread is permitted to call this
+	 */
+	cds_hlist_add_head_rcu(&sta->wtp_list, &wtp->stations);
+}
+
+static void rcu_release_wtp_from_sta(struct rcu_head *head)
+{
+	struct station *sta = caa_container_of(head, struct station, rcu_head);
+
+	if (sta->wtp)
+		refcount_put_client(sta->wtp);
+	refcount_put_station(sta);
 }
 
 void detach_station_from_wtp(struct station *sta)
 {
-	if (!sta || !sta->wtp)
+	if (!sta)
 		return;
 
+	/*
+	 * list mutating operations need mutal exclusion,
+	 * this is currently guaranteed since only the
+	 * control thread is permitted to call this
+	 */
 	cds_hlist_del_rcu(&sta->wtp_list);
-	sta->wtp = NULL;
-
-	refcount_put_station(sta);
-	refcount_put_client(sta->wtp);
+	call_rcu(&sta->rcu_head, rcu_release_wtp_from_sta);
 }
 
 static void hexdump(const unsigned char *buf, ssize_t len)
@@ -527,6 +544,7 @@ static void tap_unicast(struct worker *w, unsigned char *buffer, ssize_t len)
 	struct station *sta;
 	struct iovec iov[2];
 	struct msghdr mh;
+	struct client *wtp = NULL;
 	struct ether_header *ether = (struct ether_header *)buffer;
 
 	debug("%lx: dst unicast ether: %d, %02x:%02x:%02x:%02x:%02x:%02x\n", w->tid, ether->ether_dhost[0] & 0x01,
@@ -536,7 +554,13 @@ static void tap_unicast(struct worker *w, unsigned char *buffer, ssize_t len)
 
 	rcu_read_lock();
 
-	if ((sta = find_station(ether->ether_dhost)) != NULL) {
+	if ((sta = find_station(ether->ether_dhost)) != NULL)
+		wtp = rcu_dereference(sta->wtp);
+
+	if (wtp) {
+		/* the STA and WTP pointers are under RCU protection, so no-one will free them
+		 * as long as we hold the RCU read lock */
+
 		/* queue packet to WTP */
 
 		unsigned int hlen;
@@ -563,8 +587,8 @@ static void tap_unicast(struct worker *w, unsigned char *buffer, ssize_t len)
 
 		/* The message header contains parameters for sendmsg.    */
 		memset(&mh, 0, sizeof(mh));
-		mh.msg_name = (caddr_t)&sta->wtp->addr;
-		mh.msg_namelen = sizeof(sta->wtp->addr);
+		mh.msg_name = (caddr_t)&wtp->addr;
+		mh.msg_namelen = sizeof(wtp->addr);
 		mh.msg_iov = iov;
 		mh.msg_iovlen = 2;
 
@@ -572,7 +596,7 @@ static void tap_unicast(struct worker *w, unsigned char *buffer, ssize_t len)
 		debug("%lx: fwd tap sendmsg: %zd\n", w->tid, r);
 
 
-		debug("%lx: found STA %p, WTP %p\n", w->tid, sta, sta->wtp);
+		debug("%lx: found STA %p, WTP %p\n", w->tid, sta, wtp);
 	} else
 		packet_in_tap(buffer, len);
 
