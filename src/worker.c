@@ -380,44 +380,6 @@ static void capwap_recv(struct worker *w, struct msghdr *msg, unsigned char *buf
 	}
 }
 
-#if 0
-	struct client *clnt;
-
-	struct cds_lfht_iter iter;
-	struct cds_lfht_node *ht_node;
-	unsigned long hash;
-
-	hash = hash_sockaddr(addr);
-
-	rcu_read_lock();
-
-	cds_lfht_lookup(ht_clients, hash, match_sockaddr, addr, &iter);
-	ht_node = cds_lfht_iter_get_node(&iter);
-	if (!ht_node) {
-		clnt = calloc(1, sizeof(struct client));
-
-		urcu_ref_init(&clnt->ref);
-		cds_lfht_node_init(&clnt->node);
-		CDS_INIT_HLIST_HEAD(&clnt->stations);
-		memcpy(&clnt->addr, addr, sizeof(clnt->addr));
-
-		cds_lfht_add(ht_clients, hash, &clnt->node);
-	} else
-		clnt = caa_container_of(ht_node, struct client, node);
-
-	rcu_read_unlock();
-
-	/* do whatever we want */
-	debug("Clnt: %p, new: %d", clnt, !ht_node);
-
-	if (!ht_node) {
-		/* send new data channel notify to controller */
-	}
-
-	/* check if have the client MAC+IP or only MAC */
-
-	/* decapsulate and forward data */
-#endif
 static void capwap_read_error_q(struct worker *w, int fd)
 {
 	ssize_t r;
