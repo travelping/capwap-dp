@@ -711,7 +711,11 @@ static void *worker_thread(void *arg)
 	}
 
 	setsockopt(w->capwap_fd, SOL_SOCKET, SO_REUSEADDR, (char*)&on, sizeof(on));
+#if !defined(SO_REUSEPORT)
+#       warning "SO_REUSEPORT undefined, please upgrade to a newer kernel"
+#else
 	setsockopt(w->capwap_fd, SOL_SOCKET, SO_REUSEPORT, (char*)&on, sizeof(on));
+#endif
 	setsockopt(w->capwap_fd, SOL_IP, IP_RECVERR, (char*)&on, sizeof(on));
 	if (v6only)
 		setsockopt(w->capwap_fd, SOL_IP, IPV6_V6ONLY,(char*)&on, sizeof(on));
