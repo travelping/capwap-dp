@@ -655,21 +655,6 @@ int tap_alloc(char *dev)
 	return fd;
 }
 
-void set_if_addr(const char *dev)
-{
-	int r;
-	char cmd[MAXPATHLEN];
-
-	if (fwd_ns)
-		snprintf(cmd, sizeof(cmd), "ip netns exec %s /sbin/ifconfig %s 192.168.240.0 netmask 255.255.255.0 up", fwd_ns, dev);
-	else
-		snprintf(cmd, sizeof(cmd), "/sbin/ifconfig %s 192.168.240.0 netmask 255.255.255.0 up", dev);
-
-	debug("cmd: '%s'", cmd);
-	if ((r = system(cmd)) < 0)
-		debug("failed with : '%m'");
-}
-
 static void *worker_thread(void *arg)
 {
 	int on = 1;
@@ -789,8 +774,6 @@ int start_worker(size_t count)
 			return 0;
 		pthread_create(&workers[i].tid, NULL, worker_thread, (void *)&workers[i]);
 	}
-
-	set_if_addr(tap_dev);
 
 	return 1;
 }
