@@ -25,6 +25,8 @@
 #include <linux/if.h>
 #include <linux/if_tun.h>
 #include <net/ethernet.h>
+#include <netinet/ip.h>
+#include <netinet/udp.h>
 #include <netinet/ip_icmp.h>
 #include <linux/errqueue.h>
 
@@ -43,6 +45,7 @@
 #include "debug.h"
 #include "capwap-dp.h"
 #include "netns.h"
+#include "dhcp_internal.h"
 
 #define PRIsMAC "%02x:%02x:%02x:%02x:%02x:%02x"
 #define ARGsMAC(m) (m)[0], (m)[1], (m)[2], (m)[3], (m)[4], (m)[5]
@@ -213,7 +216,7 @@ static int match_sockaddr(struct cds_lfht_node *ht_node, const void *_key)
 	return 0;
 }
 
-struct station *find_station(uint8_t *ether)
+struct station *find_station(const uint8_t *ether)
 {
 	struct cds_lfht_iter iter;
 	struct cds_lfht_node *ht_node;
@@ -229,7 +232,7 @@ struct station *find_station(uint8_t *ether)
 	return NULL;
 }
 
-struct client *find_wtp(struct sockaddr *addr)
+struct client *find_wtp(const struct sockaddr *addr)
 {
 	struct cds_lfht_iter iter;
 	struct cds_lfht_node *ht_node;
@@ -257,7 +260,7 @@ static void stop_cb(EV_P_ ev_async *ev, int revents)
 	ev_break(EV_A_ EVBREAK_ALL);
 }
 
-unsigned long hash_sockaddr(struct sockaddr *addr)
+unsigned long hash_sockaddr(const struct sockaddr *addr)
 {
 	switch (addr->sa_family) {
 	case AF_INET:
@@ -500,31 +503,21 @@ static void capwap_cb(EV_P_ ev_io *ev, int revents)
 #undef BUFSIZE
 }
 
-static void tap_multicast(struct worker *w, unsigned char *buffer, ssize_t len)
+static int ieee8023_to_sta(struct worker *w, const unsigned char *mac, const unsigned char *buffer, ssize_t len)
 {
-	struct ether_header *ether __attribute__((unused)) = (struct ether_header *)buffer;
-
-	debug("dst mcast ether: " PRIsMAC, ARGsMAC(ether->ether_dhost));
-	debug("ether mcast type: %04x", ntohs(ether->ether_type));
-
-	packet_in_tap(buffer, len);
-}
-
-static void tap_unicast(struct worker *w, unsigned char *buffer, ssize_t len)
-{
+	int res = 0;
 	ssize_t r __attribute__((unused));
 	struct station *sta;
 	struct iovec iov[2];
 	struct msghdr mh;
 	struct client *wtp = NULL;
-	struct ether_header *ether = (struct ether_header *)buffer;
+	/* struct ether_header *ether = (struct ether_header *)buffer; */
 
-	debug("dst unicast ether: " PRIsMAC, ARGsMAC(ether->ether_dhost));
-	debug("ether unicast type: %04x", ntohs(ether->ether_type));
+	debug("STA MAC: " PRIsMAC, ARGsMAC(mac));
 
 	rcu_read_lock();
 
-	if ((sta = find_station(ether->ether_dhost)) != NULL)
+	if ((sta = find_station(mac)) != NULL)
 		wtp = rcu_dereference(sta->wtp);
 
 	if (wtp) {
@@ -552,7 +545,7 @@ static void tap_unicast(struct worker *w, unsigned char *buffer, ssize_t len)
 		 */
 		iov[0].iov_base = chdr;
 		iov[0].iov_len = 8;
-		iov[1].iov_base = buffer;
+		iov[1].iov_base = (unsigned char *)buffer;
 		iov[1].iov_len = len;
 
 		/* The message header contains parameters for sendmsg.    */
@@ -567,10 +560,59 @@ static void tap_unicast(struct worker *w, unsigned char *buffer, ssize_t len)
 
 		debug("fwd tap sendmsg: %zd", r);
 		debug("found STA %p, WTP %p", sta, wtp);
-	} else
-		packet_in_tap(buffer, len);
+
+		res = 1;
+	}
 
 	rcu_read_unlock();
+
+	return res;
+}
+
+static void tap_multicast(struct worker *w, unsigned char *buffer, ssize_t len)
+{
+	struct ether_header *ether = (struct ether_header *)buffer;
+
+	debug("dst mcast ether: " PRIsMAC, ARGsMAC(ether->ether_dhost));
+	debug("ether mcast type: %04x", ntohs(ether->ether_type));
+
+	if (ETHER_IS_VALID_LEN(len) && ntohs(ether->ether_type) == ETHERTYPE_IP) {
+		ssize_t plen = len - sizeof(struct ether_header);
+		struct iphdr *ip = (struct iphdr *)(ether + 1);
+
+		if (plen != 0 && (ip->ihl * 4 + sizeof(struct udphdr)) < plen &&
+		    ip->version == 4 && ip->protocol == IPPROTO_UDP) {
+			struct udphdr *udp = (struct udphdr *)(((unsigned char *)ip) + ip->ihl * 4);
+
+			plen -= ip->ihl * 4 + sizeof(struct udphdr);
+			debug("UDP: plen: %zd, len: %d, source: %d, dest: %d", plen, ntohs(udp->len), ntohs(udp->source), ntohs(udp->dest));
+			if (plen >= sizeof(struct dhcp_packet) && ntohs(udp->dest) == DHCP_CLIENT_PORT) {
+				struct dhcp_packet *dhcp = (struct dhcp_packet *)(udp + 1);
+
+				debug("DHCP: Op: %d, HType: %d, HLen: %d, CHADDR: " PRIsMAC, dhcp->op, dhcp->htype, dhcp->hlen, ARGsMAC(dhcp->chaddr));
+
+				if (dhcp->htype == 1 && dhcp->hlen == 6) {
+					/* forward DHCP broadcast to STA */
+					if (ieee8023_to_sta(w, dhcp->chaddr, buffer, len))
+						/* success */
+						return;
+				}
+			}
+		}
+	}
+
+	packet_in_tap(buffer, len);
+}
+
+static void tap_unicast(struct worker *w, unsigned char *buffer, ssize_t len)
+{
+	struct ether_header *ether = (struct ether_header *)buffer;
+
+	debug("dst unicast ether: " PRIsMAC, ARGsMAC(ether->ether_dhost));
+	debug("ether unicast type: %04x", ntohs(ether->ether_type));
+
+	if (!ieee8023_to_sta(w, ether->ether_dhost, buffer, len))
+		packet_in_tap(buffer, len);
 }
 
 static void tap_cb(EV_P_ ev_io *ev, int revents)

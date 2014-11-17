@@ -61,10 +61,10 @@ void packet_in_tap(const unsigned char *, ssize_t);
 void capwap_in(const struct sockaddr *, const unsigned char *, ssize_t);
 
 int start_worker(size_t);
-unsigned long hash_sockaddr(struct sockaddr *);
+unsigned long hash_sockaddr(const struct sockaddr *);
 
-struct station *find_station(uint8_t *);
-struct client *find_wtp(struct sockaddr *);
+struct station *find_station(const uint8_t *);
+struct client *find_wtp(const struct sockaddr *);
 
 void attach_station_to_wtp(struct client *, struct station *);
 void detach_station_from_wtp(struct station *);
