@@ -284,19 +284,22 @@ static void forward_capwap(struct worker *w, struct sockaddr *addr, struct ether
 		/* queue packet to TAP */
 
 		debug("found STA %p, WTP %p", sta, sta->wtp);
-	}
 
-	/* FIXME: shortcat write */
-	iov[0].iov_base = ether;
-	iov[0].iov_len = ETH_ALEN * 2;
-	iov[1].iov_base = data;
-	iov[1].iov_len = len;
+		/* FIXME: shortcat write */
+		iov[0].iov_base = ether;
+		iov[0].iov_len = ETH_ALEN * 2;
+		iov[1].iov_base = data;
+		iov[1].iov_len = len;
 
-	hexdump(iov[0].iov_base, iov[0].iov_len);
-	hexdump(iov[1].iov_base, iov[1].iov_len);
+		hexdump(iov[0].iov_base, iov[0].iov_len);
+		hexdump(iov[1].iov_base, iov[1].iov_len);
 
-	r = writev(w->tap_fd, iov, 2);
-	debug("fwd CW writev: %d", r);
+		if ((r = writev(w->tap_fd, iov, 2)) < 0) {
+			perror("writev");
+		}
+		debug("fwd CW writev: %d", r);
+	} else
+		debug("got CAPWAP DP from unknown station " PRIsMAC, ARGsMAC(ether->ether_shost));
 
 	rcu_read_unlock();
 }
@@ -324,7 +327,7 @@ static void capwap_recv(struct worker *w, struct msghdr *msg, unsigned char *buf
 		return;
 
 	if (GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_F_K, 0)) {
-		capwap_in_keep_alive(addr, buffer, len);
+		capwap_in(addr, buffer, len);
 		return;
 	}
 
@@ -355,6 +358,7 @@ static void capwap_recv(struct worker *w, struct msghdr *msg, unsigned char *buf
 		if (WLAN_FC_GET_TYPE(fc) == WLAN_FC_TYPE_MGMT) {
 			/* push mgmt to controller */
 			debug("management frame");
+			capwap_in(addr, buffer, len);
 			return;
 		}
 		else if (WLAN_FC_GET_TYPE(fc) == WLAN_FC_TYPE_DATA &&

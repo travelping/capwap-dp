@@ -728,7 +728,7 @@ void capwap_socket_error(int origin, int type, const struct sockaddr *addr)
 	control_enqueue(erl_mk_tuple(msg, 4));
 }
 
-void capwap_in_keep_alive(const struct sockaddr *addr, const unsigned char *buf, ssize_t len)
+void capwap_in(const struct sockaddr *addr, const unsigned char *buf, ssize_t len)
 {
 	ETERM *msg[3];
 
