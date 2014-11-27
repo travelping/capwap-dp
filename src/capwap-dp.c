@@ -319,11 +319,8 @@ static ETERM *erl_send_to(ETERM *tuple)
 
 static ETERM *erl_add_wtp(ETERM *tuple)
 {
-	struct client *clnt;
 	char ipaddr[INET6_ADDRSTRLEN];
 	struct sockaddr_storage addr;
-
-	unsigned long hash;
 
 	if (ERL_TUPLE_SIZE(tuple) != 2)
 		return erl_mk_atom("badarg");
@@ -334,32 +331,8 @@ static ETERM *erl_add_wtp(ETERM *tuple)
 	inet_ntop(addr.ss_family, SIN_ADDR_PTR(&addr), ipaddr, sizeof(ipaddr));
 	fprintf(stderr, "IP: %s:%d\n", ipaddr, ntohs(SIN_PORT(&addr)));
 
-	hash = hash_sockaddr((struct sockaddr *)&addr);
-
-	clnt = calloc(1, sizeof(struct client));
-	if (!clnt)
+	if (!add_wtp((struct sockaddr *)&addr))
 		return erl_mk_atom("enomem");
-
-	urcu_ref_init(&clnt->ref);
-	cds_lfht_node_init(&clnt->node);
-	CDS_INIT_HLIST_HEAD(&clnt->stations);
-	memcpy(&clnt->addr, &addr, sizeof(addr));
-
-	/*
-	 * cds_lfht_add() needs to be called from RCU read-side
-	 * critical section.
-	 */
-	rcu_read_lock();
-
-	/*
-	 * Mutating operations need mutal exclusion from each other,
-	 * only concurrent reads are allowed.
-	 * This is currently guaranteed since only the
-	 * control thread is permitted to call this.
-	 */
-	cds_lfht_add(ht_clients, hash, &clnt->node);
-
-	rcu_read_unlock();
 
 	return erl_mk_atom("ok");
 }
@@ -394,7 +367,17 @@ static ETERM *erl_get_wtp(ETERM *tuple)
 
 static ETERM *erl_del_wtp(ETERM *tuple)
 {
-	return erl_mk_atom("not implemented yet");
+	int r;
+	struct sockaddr_storage addr;
+
+	if (ERL_TUPLE_SIZE(tuple) != 2)
+		return erl_mk_atom("badarg");
+
+	if (!tuple2sockaddr(erl_element(2, tuple), &addr))
+		return erl_mk_atom("badarg");
+
+	r = delete_wtp((struct sockaddr *)&addr);
+	return (r ? erl_mk_atom("ok") : erl_mk_atom("failed"));
 }
 
 static ETERM *erl_list_wtp(ETERM *tuple)
@@ -414,6 +397,21 @@ static ETERM *erl_list_wtp(ETERM *tuple)
         rcu_read_unlock();
 
 	return list;
+}
+
+static ETERM *erl_clear()
+{
+        struct cds_lfht_iter iter;      /* For iteration on hash table */
+	struct client *wtp;
+
+        rcu_read_lock();
+
+        cds_lfht_for_each_entry(ht_clients, &iter, wtp, node)
+		__delete_wtp(wtp);
+
+        rcu_read_unlock();
+
+	return erl_mk_atom("ok");
 }
 
 static ETERM *erl_attach_station(ETERM *tuple)
@@ -513,6 +511,9 @@ static ETERM *handle_gen_call_capwap(struct controller *cnt, const char *fn, ETE
 	}
 	if (strncmp(fn, "bind", 4) == 0) {
 		return erl_bind(cnt, tuple);
+	}
+	if (strncmp(fn, "clear", 4) == 0) {
+		return erl_clear();
 	}
 	if (strncmp(fn, "add_wtp", 7) == 0) {
 		return erl_add_wtp(tuple);

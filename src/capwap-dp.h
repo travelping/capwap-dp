@@ -69,6 +69,11 @@ struct client *find_wtp(const struct sockaddr *);
 void attach_station_to_wtp(struct client *, struct station *);
 void detach_station_from_wtp(struct station *);
 
+struct client *add_wtp(const struct sockaddr *);
+int delete_wtp(const struct sockaddr *);
+
+int __delete_wtp(struct client *wtp);
+
 /**
  * CAPWAP Transport Header
  *

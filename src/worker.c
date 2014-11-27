@@ -232,20 +232,102 @@ struct station *find_station(const uint8_t *ether)
 	return NULL;
 }
 
-struct client *find_wtp(const struct sockaddr *addr)
+
+static struct cds_lfht_node *get_wtp_node(const struct sockaddr *addr)
 {
 	struct cds_lfht_iter iter;
-	struct cds_lfht_node *ht_node;
 	unsigned long hash;
 
 	hash = hash_sockaddr(addr);
 
 	cds_lfht_lookup(ht_clients, hash, match_sockaddr, addr, &iter);
-	ht_node = cds_lfht_iter_get_node(&iter);
-	if (ht_node)
+	return cds_lfht_iter_get_node(&iter);
+}
+
+struct client *find_wtp(const struct sockaddr *addr)
+{
+	struct cds_lfht_node *ht_node;
+
+	if ((ht_node = get_wtp_node(addr)) != NULL)
 		return caa_container_of(ht_node, struct client, node);
 
 	return NULL;
+}
+
+static void rcu_release_wtp(struct rcu_head *head)
+{
+	struct client *wtp = caa_container_of(head, struct client, rcu_head);
+
+	refcount_put_client(wtp);
+}
+
+struct client *add_wtp(const struct sockaddr *addr)
+{
+	struct client *wtp;
+	unsigned long hash;
+
+	hash = hash_sockaddr((struct sockaddr *)&addr);
+
+	if (!(wtp = calloc(1, sizeof(struct client))))
+	    return NULL;
+
+	urcu_ref_init(&wtp->ref);
+	cds_lfht_node_init(&wtp->node);
+	CDS_INIT_HLIST_HEAD(&wtp->stations);
+	memcpy(&wtp->addr, addr, sizeof(wtp->addr));
+
+	/*
+	 * cds_lfht_add() needs to be called from RCU read-side
+	 * critical section.
+	 */
+	rcu_read_lock();
+
+	/*
+	 * Mutating operations need mutal exclusion from each other,
+	 * only concurrent reads are allowed.
+	 * This is currently guaranteed since only the
+	 * control thread is permitted to call this.
+	 */
+	cds_lfht_add(ht_clients, hash, &wtp->node);
+
+	rcu_read_unlock();
+
+	return wtp;
+}
+
+int __delete_wtp(struct client *wtp)
+{
+	int r;
+	struct station *sta, *n;
+
+	/*
+	 * list and hash mutating operations need mutal exclusion,
+	 * this is currently guaranteed since only the
+	 * control thread is permitted to call this
+	 */
+
+	cds_hlist_for_each_entry_safe_2(sta, n, &wtp->stations, wtp_list)
+		detach_station_from_wtp(sta);
+
+	if ((r = cds_lfht_del(ht_clients, &wtp->node)))
+		call_rcu(&wtp->rcu_head, rcu_release_wtp);
+
+	return r;
+}
+
+int delete_wtp(const struct sockaddr *addr)
+{
+	int r = 0;
+	struct client *wtp;
+
+	rcu_read_lock();
+
+	if ((wtp = find_wtp(addr)) != NULL)
+		r = __delete_wtp(wtp);
+
+	rcu_read_unlock();
+
+	return r;
 }
 
 static void stop_cb(EV_P_ ev_async *ev, int revents)
