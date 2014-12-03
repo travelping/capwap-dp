@@ -13,6 +13,31 @@ extern int capwap_port;
 extern const char *capwap_ns;
 extern const char *fwd_ns;
 
+#define MAX_FRAGMENTS 32
+#define FRGMT_BUFFER (8 * 1024)
+#define FRGMT_MAX 16
+
+struct frgmt {
+	unsigned int fragment_id;
+
+        unsigned int count;
+        struct {
+                unsigned int start;
+                unsigned int end;
+        } parts[FRGMT_MAX];
+
+        unsigned int hdrlen;
+        unsigned int length;
+
+	unsigned char buffer[FRGMT_BUFFER];
+};
+
+struct frgmt_buffer {
+	pthread_mutex_t lock;
+	int base;
+	struct frgmt frgmt[MAX_FRAGMENTS];
+};
+
 struct client;
 
 struct station {
@@ -32,7 +57,10 @@ struct client {
 	struct cds_lfht_node node;
 
 	struct sockaddr_storage addr;
+	unsigned int mtu;
+	uint16_t fragment_id;
 	struct cds_hlist_head stations;
+	struct frgmt_buffer frgmt_buffer;
 };
 
 struct worker {
@@ -70,7 +98,7 @@ struct client *find_wtp(const struct sockaddr *);
 void attach_station_to_wtp(struct client *, struct station *);
 void detach_station_from_wtp(struct station *);
 
-struct client *add_wtp(const struct sockaddr *);
+struct client *add_wtp(const struct sockaddr *, unsigned int mtu);
 int delete_wtp(const struct sockaddr *);
 
 int __delete_wtp(struct client *wtp);
@@ -118,9 +146,9 @@ int __delete_wtp(struct client *wtp);
 #define CAPWAP_F_RMAC        htobe32(0x00000010)
 #define CAPWAP_F_K           htobe32(0x00000008)
 
-#define CAPWAP_FRAG_ID_MASK     htobe32(xFFFF0000)
+#define CAPWAP_FRAG_ID_MASK     htobe32(0xFFFF0000)
 #define CAPWAP_FRAG_ID_SHIFT    16
-#define CAPWAP_FRAG_OFFS_MASK   htobe32(x0000FFF8)
+#define CAPWAP_FRAG_OFFS_MASK   htobe32(0x0000FFF8)
 #define CAPWAP_FRAG_OFFS_SHIFT   3
 
 enum capwap_payload_t {

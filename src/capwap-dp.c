@@ -224,18 +224,19 @@ ETERM *ether2bin(uint8_t *ether)
 ETERM *wtp2term(struct client *clnt)
 {
 	struct station *sta;
-	ETERM *wtp[3];
+	ETERM *wtp[4];
 
 	wtp[0] = sockaddr2term((struct sockaddr *)&clnt->addr);
 	wtp[1] = erl_mk_empty_list();
 	wtp[2] = erl_mk_int(clnt->ref.refcount);
+	wtp[3] = erl_mk_int(clnt->mtu);
 
         cds_hlist_for_each_entry_rcu_2(sta, &clnt->stations, wtp_list) {
 		ETERM *mac = ether2bin(sta->ether);
 		wtp[1] = erl_cons(mac, wtp[1]);
 	}
 
-	return erl_mk_tuple(wtp, 3);
+	return erl_mk_tuple(wtp, 4);
 }
 
 static void async_reply(struct controller *cnt, ETERM *from, ETERM *resp)
@@ -327,8 +328,10 @@ static ETERM *erl_add_wtp(ETERM *tuple)
 {
 	char ipaddr[INET6_ADDRSTRLEN];
 	struct sockaddr_storage addr;
+	ETERM *emtu;
+	unsigned int mtu;
 
-	if (ERL_TUPLE_SIZE(tuple) != 2)
+	if (ERL_TUPLE_SIZE(tuple) != 3)
 		return erl_mk_atom("badarg");
 
 	if (!tuple2sockaddr(erl_element(2, tuple), &addr))
@@ -337,7 +340,13 @@ static ETERM *erl_add_wtp(ETERM *tuple)
 	inet_ntop(addr.ss_family, SIN_ADDR_PTR(&addr), ipaddr, sizeof(ipaddr));
 	fprintf(stderr, "IP: %s:%d\n", ipaddr, ntohs(SIN_PORT(&addr)));
 
-	if (!add_wtp((struct sockaddr *)&addr))
+	emtu = erl_element(3, tuple);
+	if (!ERL_IS_INTEGER(emtu))
+		return erl_mk_atom("badarg");
+	mtu = ERL_INT_UVALUE(emtu);
+	erl_free_term(emtu);
+
+	if (!add_wtp((struct sockaddr *)&addr, mtu))
 		return erl_mk_atom("enomem");
 
 	return erl_mk_atom("ok");

@@ -237,8 +237,12 @@ static struct cds_lfht_node *get_wtp_node(const struct sockaddr *addr)
 {
 	struct cds_lfht_iter iter;
 	unsigned long hash;
+	char ipaddr[INET6_ADDRSTRLEN];
 
 	hash = hash_sockaddr(addr);
+
+	inet_ntop(addr->sa_family, SIN_ADDR_PTR(addr), ipaddr, sizeof(ipaddr));
+	fprintf(stderr, "get_wtp_node IP: %s:%d, hash: 0x%08lx\n", ipaddr, ntohs(SIN_PORT(addr)), hash);
 
 	cds_lfht_lookup(ht_clients, hash, match_sockaddr, addr, &iter);
 	return cds_lfht_iter_get_node(&iter);
@@ -261,12 +265,16 @@ static void rcu_release_wtp(struct rcu_head *head)
 	refcount_put_client(wtp);
 }
 
-struct client *add_wtp(const struct sockaddr *addr)
+struct client *add_wtp(const struct sockaddr *addr, unsigned int mtu)
 {
 	struct client *wtp;
 	unsigned long hash;
+	char ipaddr[INET6_ADDRSTRLEN];
 
-	hash = hash_sockaddr((struct sockaddr *)&addr);
+	hash = hash_sockaddr((struct sockaddr *)addr);
+
+	inet_ntop(addr->sa_family, SIN_ADDR_PTR(addr), ipaddr, sizeof(ipaddr));
+	fprintf(stderr, "add_wtp IP: %s:%d, hash: 0x%08lx\n", ipaddr, ntohs(SIN_PORT(addr)), hash);
 
 	if (!(wtp = calloc(1, sizeof(struct client))))
 	    return NULL;
@@ -274,7 +282,9 @@ struct client *add_wtp(const struct sockaddr *addr)
 	urcu_ref_init(&wtp->ref);
 	cds_lfht_node_init(&wtp->node);
 	CDS_INIT_HLIST_HEAD(&wtp->stations);
+	pthread_mutex_init(&wtp->frgmt_buffer.lock, 0);
 	memcpy(&wtp->addr, addr, sizeof(wtp->addr));
+	wtp->mtu = mtu;
 
 	/*
 	 * cds_lfht_add() needs to be called from RCU read-side
@@ -356,7 +366,7 @@ unsigned long hash_sockaddr(const struct sockaddr *addr)
 	return jhash(addr, sizeof(addr), 0);
 }
 
-static void forward_capwap(struct worker *w, struct sockaddr *addr, struct ether_header *ether, unsigned char *data, unsigned int len)
+static void forward_capwap(struct worker *w, const struct sockaddr *addr, struct ether_header *ether, unsigned char *data, unsigned int len)
 {
 	struct station *sta;
 	struct iovec iov[2];
@@ -380,7 +390,7 @@ static void forward_capwap(struct worker *w, struct sockaddr *addr, struct ether
 		hexdump(iov[1].iov_base, iov[1].iov_len);
 
 		if ((r = writev(w->tap_fd, iov, 2)) < 0) {
-			perror("writev");
+			debug("writev: %m");
 		}
 		debug("fwd CW writev: %d", r);
 	} else
@@ -389,39 +399,14 @@ static void forward_capwap(struct worker *w, struct sockaddr *addr, struct ether
 	rcu_read_unlock();
 }
 
-static void capwap_recv(struct worker *w, struct msghdr *msg, unsigned char *buffer, unsigned int len)
+static void handle_capwap_packet(struct worker *w, struct msghdr *msg, unsigned char *buffer, unsigned int len)
 {
-	char ipaddr[INET6_ADDRSTRLEN];
-	struct sockaddr *addr = (struct sockaddr *)msg->msg_name;
+	const struct sockaddr *addr = (struct sockaddr *)msg->msg_name;
+	unsigned int hlen    = GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_HLEN_MASK, CAPWAP_HLEN_SHIFT) * 4;
+	unsigned char *data  = buffer + hlen;
+	unsigned int datalen = len - hlen;
 
-	unsigned int hlen;
 	unsigned int wbid;
-	unsigned char *data;
-	unsigned int datalen;
-
-	inet_ntop(addr->sa_family, SIN_ADDR_PTR(addr), ipaddr, sizeof(ipaddr));
-	debug("read %d bytes from %s:%d",
-	      len, ipaddr, ntohs(SIN_PORT(addr)));
-	hexdump(buffer, len);
-
-	if (len < CAPWAP_HEADER_LEN)
-		return;
-
-	hlen = GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_HLEN_MASK, CAPWAP_HLEN_SHIFT) * 4;
-	if (len < hlen)
-		return;
-
-	if (GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_F_K, 0)) {
-		capwap_in(addr, buffer, len);
-		return;
-	}
-
-	if (GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_F_FRAG, 0))
-		/* FIXME: no fragmentation support (yet) */
-		return;
-
-	data = buffer + hlen;
-	datalen = len - hlen;
 
 	if (GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_F_TYPE, 0))
 		wbid = GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_WBID_MASK, CAPWAP_WBID_SHIFT);
@@ -465,8 +450,235 @@ static void capwap_recv(struct worker *w, struct msghdr *msg, unsigned char *buf
 	}
 
 	default:
+		debug("ignoring: unsupported payload type %d", wbid);
 		return;
 	}
+}
+
+#define THDR_ROOM  64
+
+#define in_range_s(v, start, end)		\
+	(((v) >= (start)) && ((v) < (end)))
+#define in_range_e(v, start, end)		\
+	(((v) > (start)) && ((v) <= (end)))
+
+#define overlap(s1, e1, s2, e2)					\
+	(in_range_s(s1, s2, e2) || in_range_e(e1, s2, e2) ||	\
+	 in_range_s(s2, s1, e1) || in_range_e(e2, s1, e1))
+
+#if !defined(NDEBUG)
+
+static void debug_fragments(struct frgmt *f, const char *tag)
+{
+	struct timeval tv;
+	int i;
+
+	gettimeofday(&tv, NULL);
+
+	for (i = 0; i < f->count; i++) {
+		debug_head(&tv);
+		debug_log("   %s:[%2d]: %8d/%8d\n", tag, i, f->parts[i].start, f->parts[i].end);
+	}
+	debug_flush();
+}
+
+#else
+
+static inline void debug_fragments(struct frgmt *f __attribute__((unused)), const char *tag __attribute__((unused)))
+{
+}
+
+#endif
+
+
+static int add_fragment(struct frgmt *f, unsigned char *buffer, unsigned int len)
+{
+	unsigned int hlen = GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_HLEN_MASK, CAPWAP_HLEN_SHIFT) * 4;
+	unsigned char *data = buffer + hlen;
+	unsigned int datalen = len - hlen;
+
+	unsigned int start = GET_CAPWAP_HEADER_FIELD(buffer + 4, CAPWAP_FRAG_OFFS_MASK, CAPWAP_FRAG_OFFS_SHIFT) * 8;
+	unsigned int end = start + datalen;
+	int last = GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_F_LASTFRAG, 0);
+
+	int i;
+
+	debug("add_fragment: new start: %d, end: %d", start, end);
+	debug_fragments(f, "before");
+
+	for (i = 0; i < f->count; i++) {
+		if (overlap(f->parts[i].start, f->parts[i].end, start, end)) {
+			debug("Action: skip due to overlap");
+			return 0;
+		}
+
+		if (f->parts[i].end == start) {
+			/* append to current fragment */
+			debug("Action: append to current fragment");
+			f->parts[i].end = end;
+
+			if (i + 1 < f->count)
+				if (f->parts[i].end == f->parts[i + 1].start) {
+					/* merge current to next fragment */
+					debug("Action: merge current to next fragment");
+					f->parts[i].end = f->parts[i + 1].end;
+					f->count--;
+
+					if (i + 1 < f->count)
+						memmove(&f->parts[i + 1], &f->parts[i + 2], sizeof(f->parts[i]) * (f->count - (i + 2)));
+				}
+			break;
+		}
+		else if (f->parts[i].start == end) {
+			/* prepend to current fragment */
+			debug("Action: prepend to current fragment");
+			f->parts[i].start = start;
+
+			break;
+		}
+		else if (f->parts[i].start > start) {
+			/* insert before */
+			debug("Action: insert before current fragment");
+			if (f->count >= FRGMT_MAX)
+				return 0;
+
+			memmove(&f->parts[i + 1], &f->parts[i], sizeof(f->parts[i]) * (f->count - i));
+			f->parts[i].start = start;
+			f->parts[i].end = end;
+			f->count++;
+
+			break;
+		}
+	}
+	if (i == f->count) {
+		debug("Action: append to list");
+		if (f->count >= FRGMT_MAX)
+			return 0;
+
+		f->parts[i].start = start;
+		f->parts[i].end = end;
+		f->count++;
+	}
+
+	debug_fragments(f, "after");
+
+	if (last)
+		f->length = end;
+
+	if (start == 0) {
+		if (hlen > THDR_ROOM)
+			/* make sure the transport header fits the reserved space */
+			return 0;
+
+		/* first packet - take everything, including the transport header */
+		f->hdrlen = hlen;
+		memcpy(f->buffer + THDR_ROOM - f->hdrlen, buffer, len);
+	} else
+		/* fragment - only take the payload */
+		memcpy(f->buffer + THDR_ROOM + start, data, datalen);
+
+	/* - have seen the first and the last packet,
+	 * - only one (whole) part remains and i covers the full payload */
+	return (f->length != 0 && f->hdrlen != 0) &&
+		(f->count == 1 && f->parts[0].start == 0 && f->parts[0].end == f->length);
+}
+
+static void handle_capwap_fragment(struct worker *w, struct msghdr *msg, unsigned char *buffer, unsigned int len)
+{
+	const struct sockaddr *addr = (struct sockaddr *)msg->msg_name;
+	unsigned int hlen = GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_HLEN_MASK, CAPWAP_HLEN_SHIFT) * 4;
+	unsigned int datalen = len - hlen;
+
+	unsigned int id, fragment_id = id = GET_CAPWAP_HEADER_FIELD(buffer + 4, CAPWAP_FRAG_ID_MASK, CAPWAP_FRAG_ID_SHIFT);
+	unsigned int start = GET_CAPWAP_HEADER_FIELD(buffer + 4, CAPWAP_FRAG_OFFS_MASK, CAPWAP_FRAG_OFFS_SHIFT) * 8;
+	unsigned int end = start + datalen;
+	int last = GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_F_LASTFRAG, 0);
+
+	struct client *wtp;
+	struct frgmt *f;
+	int done;
+
+	debug("Fragment Id: %d, offset: %d, end: %d, last: %d", fragment_id, start, end, !!last);
+
+	if ((!last && (datalen % 8) != 0) || end > FRGMT_BUFFER) {
+		debug("invalid fragment, size %d, end %d", datalen, end);
+		return;
+	}
+
+	rcu_read_lock();
+	if (!(wtp = find_wtp(addr))) {
+		rcu_read_unlock();
+		return;
+	}
+
+	pthread_mutex_lock(&wtp->frgmt_buffer.lock);
+
+	if (wtp->frgmt_buffer.base > 0x8000 && id < (wtp->frgmt_buffer.base - 0x8000))
+		/* 16bit wrap */
+		id += 0x10000;
+
+	debug("Fragment buffer: base: %d, Id: %d", wtp->frgmt_buffer.base, id);
+
+	if (id < wtp->frgmt_buffer.base) {
+		/* fragment to old */
+		debug("Fragment too old");
+		return;
+	}
+
+	if (id - wtp->frgmt_buffer.base > MAX_FRAGMENTS)
+		wtp->frgmt_buffer.base = id - MAX_FRAGMENTS;
+
+	f = &wtp->frgmt_buffer.frgmt[id % MAX_FRAGMENTS];
+	if (f->fragment_id != fragment_id) {
+		memset(f, 0, sizeof(*f));
+		f->fragment_id = fragment_id;
+	}
+
+	done = add_fragment(f, buffer, len);
+	if (done) {
+		handle_capwap_packet(w, msg, f->buffer + THDR_ROOM - f->hdrlen, f->hdrlen + f->length);
+		if (wtp->frgmt_buffer.base == f->fragment_id)
+			/* advance base fragment id */
+			wtp->frgmt_buffer.base++;
+	}
+
+	pthread_mutex_unlock(&wtp->frgmt_buffer.lock);
+	rcu_read_unlock();
+}
+
+#undef THDR_ROOM
+#undef in_range_s
+#undef in_range_e
+#undef overlap
+
+static void capwap_recv(struct worker *w, struct msghdr *msg, unsigned char *buffer, unsigned int len)
+{
+	char ipaddr[INET6_ADDRSTRLEN];
+	const struct sockaddr *addr = (struct sockaddr *)msg->msg_name;
+
+	unsigned int hlen;
+
+	inet_ntop(addr->sa_family, SIN_ADDR_PTR(addr), ipaddr, sizeof(ipaddr));
+	debug("read %d bytes from %s:%d",
+	      len, ipaddr, ntohs(SIN_PORT(addr)));
+	hexdump(buffer, len);
+
+	if (len < CAPWAP_HEADER_LEN)
+		return;
+
+	hlen = GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_HLEN_MASK, CAPWAP_HLEN_SHIFT) * 4;
+	if (len < hlen)
+		return;
+
+	if (GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_F_K, 0)) {
+		capwap_in(addr, buffer, len);
+		return;
+	}
+
+	if (GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_F_FRAG, 0))
+		handle_capwap_fragment(w, msg, buffer, len);
+	else
+		handle_capwap_packet(w, msg, buffer, len);
 }
 
 static void capwap_read_error_q(struct worker *w, int fd)
@@ -499,6 +711,7 @@ static void capwap_read_error_q(struct worker *w, int fd)
 		 * http://www.kernel.org/doc/man-pages/online/pages/man3/cmsg.3.html
 		 */
 		for (cmsg = CMSG_FIRSTHDR(&msg);cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg))  {
+			debug("CMSG: Level: %d, Type: %d", cmsg->cmsg_level, cmsg->cmsg_type);
 			/* Ip level */
 			if (cmsg->cmsg_level == SOL_IP &&
 			    cmsg->cmsg_type == IP_RECVERR) {
@@ -510,6 +723,8 @@ static void capwap_read_error_q(struct worker *w, int fd)
 								  sock_err->ee_type,
 								  msg.msg_name);
 */
+				if (sock_err)
+					debug("IP_RECVERR: origin: %d, type: %d", sock_err->ee_origin, sock_err->ee_type);
 
 				if (sock_err && sock_err->ee_origin == SO_EE_ORIGIN_ICMP) {
 					/* Handle ICMP errors types */
@@ -537,6 +752,14 @@ static void capwap_read_error_q(struct worker *w, int fd)
 						break;
 					}
 				}
+			}
+			else if (cmsg->cmsg_level == SOL_IPV6 &&
+				 cmsg->cmsg_type == IPV6_RECVERR) {
+				debug("We got IPV6_RECVERR message (msg_name: %p)", msg.msg_name);
+				sock_err = (struct sock_extended_err*)CMSG_DATA(cmsg);
+
+				if (sock_err)
+					debug("IPV6_RECVERR: origin: %d, type: %d", sock_err->ee_origin, sock_err->ee_type);
 			}
 		}
 	}
@@ -570,8 +793,10 @@ static void capwap_cb(EV_P_ ev_io *ev, int revents)
 
 	r = recvmmsg(ev->fd, msgs, VLEN, MSG_DONTWAIT, NULL);
 	if (r < 0) {
-		perror("recvmmsg");
-		capwap_read_error_q(w, ev->fd);
+		if (errno == EAGAIN)
+			capwap_read_error_q(w, ev->fd);
+		else
+			debug("recvmmsg: %m");
 		return;
 	}
 
@@ -585,15 +810,274 @@ static void capwap_cb(EV_P_ ev_io *ev, int revents)
 #undef BUFSIZE
 }
 
-static int ieee8023_to_sta(struct worker *w, const unsigned char *mac, const unsigned char *buffer, ssize_t len)
+static int df_bit(const unsigned char *buffer, ssize_t len)
 {
-	int res = 0;
+	struct ether_header *ether = (struct ether_header *)buffer;
+
+	if (!ETHER_IS_VALID_LEN(len) || len < sizeof(struct ether_header))
+		return 0;
+
+	switch (ntohs(ether->ether_type)) {
+	case ETHERTYPE_IP: {
+		ssize_t plen = len - sizeof(struct ether_header);
+		struct ip *ip = (struct ip *)(ether + 1);
+
+		if (plen < sizeof(struct ip))
+			return 0;
+
+		return !!(ntohs(ip->ip_off) & IP_DF);
+	}
+	case ETHERTYPE_IPV6:
+		return 1;
+	}
+	return 0;
+}
+
+/*
+ *      This table is the definition of how we handle ICMP.
+ */
+static const unsigned char icmp_pointers[] = {
+        [ICMP_ECHOREPLY] = 0,
+        [1] = 1,
+        [2] = 1,
+        [ICMP_DEST_UNREACH] = 1,
+        [ICMP_SOURCE_QUENCH] = 1,
+        [ICMP_REDIRECT] = 1,
+        [6] = 1,
+        [7] = 1,
+        [ICMP_ECHO] = 0,
+        [9] = 1,
+        [10] = 1,
+        [ICMP_TIME_EXCEEDED] = 1,
+        [ICMP_PARAMETERPROB] = 1,
+        [ICMP_TIMESTAMP] = 0,
+        [ICMP_TIMESTAMPREPLY] = 0,
+        [ICMP_INFO_REQUEST] = 0,
+        [ICMP_INFO_REPLY] = 0,
+        [ICMP_ADDRESS] = 0,
+        [ICMP_ADDRESSREPLY] = 0
+};
+
+static uint32_t cksum_part(uint8_t *ip, int len, uint32_t sum)
+{
+	while (len > 1) {
+		sum += *(uint16_t *)ip;
+		if (sum & 0x80000000)   /* if high order bit set, fold */
+			sum = (sum & 0xFFFF) + (sum >> 16);
+		len -= 2;
+		ip += 2;
+	}
+
+	if (len)       /* take care of left over byte */
+		sum += (uint16_t) *(uint8_t *)ip;
+
+	return sum;
+}
+
+static uint16_t cksum_finish(uint32_t sum)
+{
+	while (sum >> 16)
+		sum = (sum & 0xFFFF) + (sum >> 16);
+
+	return ~sum;
+}
+
+static uint16_t cksum(uint8_t *ip, int len)
+{
+	return cksum_finish(cksum_part(ip, len, 0));
+}
+
+static int send_icmp_pkt_to_big(struct worker *w, unsigned int mtu, const unsigned char *buffer, ssize_t len)
+{
+	struct ether_header *ether_in = (struct ether_header *)buffer;
+	struct ether_header *ether_out;
+	struct iovec iov[2];
+	unsigned int room;
+	unsigned char b[128];
+	int r __attribute__((unused));
+
+        /* No replies to physical multicast/broadcast */
+	if (ether_in->ether_dhost[5] & 0x02)
+		return 1;
+
+	memset(&b, 0, sizeof(b));
+
+	iov[0].iov_base = &b;
+	/* skip the ether header */
+	iov[1].iov_base = (unsigned char *)buffer + sizeof(struct ether_header);
+
+	ether_out = (struct ether_header *)&b;
+	memcpy(ether_out->ether_dhost, ether_in->ether_shost, sizeof(ether_out->ether_dhost));
+	memcpy(ether_out->ether_shost, ether_in->ether_dhost, sizeof(ether_out->ether_shost));
+	ether_out->ether_type = ether_in->ether_type;
+
+	switch (ntohs(ether_in->ether_type)) {
+	case ETHERTYPE_IP: {
+		struct iphdr *ip_in = (struct iphdr *)(ether_in + 1);
+		struct iphdr *iph = (struct iphdr *)(ether_out + 1);
+
+		/* Only reply to fragment 0. */
+		if (ip_in->frag_off & htons(0x1FFF))
+			return 1;
+
+		/* If we send an ICMP error to an ICMP error a mess would result.. */
+                if (ip_in->protocol == IPPROTO_ICMP) {
+			struct icmphdr *icmph = (struct icmphdr *)(buffer + sizeof(struct ether_header) + ip_in->ihl * 4);
+
+                        /* Assume any unknown ICMP type is an error. */
+			if (icmph->type > CAA_ARRAY_SIZE(icmp_pointers) || icmp_pointers[icmph->type])
+				return 1;
+                }
+
+		iov[0].iov_len = sizeof(struct ether_header) + sizeof(struct iphdr) + sizeof(struct icmphdr);
+		iov[1].iov_len = len - sizeof(struct ether_header);
+
+		/* RFC says return as much as we can without exceeding 576 bytes. */
+		room = 576 - sizeof(struct iphdr) + sizeof(struct icmphdr);
+		if (iov[1].iov_len > room)
+			iov[1].iov_len = room;
+
+
+		iph->version = 4;
+		iph->ihl = sizeof(struct iphdr) / 4;
+		iph->tot_len = htons(sizeof(struct iphdr) + sizeof(struct icmphdr) + iov[1].iov_len);
+		iph->ttl = 64;
+		iph->tos = (ip_in->tos & IPTOS_TOS_MASK) | IPTOS_PREC_INTERNETCONTROL;
+		iph->protocol = IPPROTO_ICMP;
+		iph->saddr = ip_in->daddr;               /* FIXME: this should be OUR address */
+		iph->daddr = ip_in->saddr;
+		iph->check = cksum((uint8_t *)iph, sizeof(struct iphdr));
+
+		/*
+		 * we don't do IP options
+		 */
+
+		struct icmphdr *icmp = (struct icmphdr *)(iph + 1);
+
+		icmp->type        = ICMP_DEST_UNREACH;
+		icmp->code        = ICMP_FRAG_NEEDED;
+		icmp->un.frag.mtu = htons(mtu);
+
+		uint32_t csum;
+		csum = cksum_part((uint8_t *)icmp, sizeof(struct icmphdr), 0);
+		csum = cksum_part((uint8_t *)iov[1].iov_base, iov[1].iov_len, csum);
+		icmp->checksum = cksum_finish(csum);
+
+		/* send! */
+		if ((r = writev(w->tap_fd, iov, 2)) < 0) {
+			debug("writev: %m");
+		}
+		debug("send icmp writev: %d", r);
+        }
+	break;
+
+	case ETHERTYPE_IPV6:
+		/* TODO !!! */
+		break;
+
+	default:
+		return 1;
+	}
+
+
+	return 1;
+}
+
+static int ieee8023_to_wtp(struct worker *w, struct client *wtp, const unsigned char *buffer, ssize_t len)
+{
 	ssize_t r __attribute__((unused));
-	struct station *sta;
 	struct iovec iov[2];
 	struct msghdr mh;
+
+	ssize_t hlen;
+	unsigned char chdr[32];
+
+	int is_frag = 0;
+	unsigned int frag_id = 0;
+	unsigned int frag_count = 1;
+	ssize_t max_len;
+	ssize_t frag_size = len;
+
+	/* TODO: calculate hlen based on binding and optional header */
+	hlen = 2;
+
+	max_len = wtp->mtu - sizeof(struct iphdr) - sizeof(struct udphdr) - hlen * 4;
+
+	if (len > max_len) {
+		frag_size = ((wtp->mtu - sizeof(struct iphdr) - sizeof(struct udphdr) - hlen * 4) / 8) * 8;
+		frag_count = (len + frag_size - 1) / frag_size;
+		is_frag = 1;
+	}
+
+        debug("Aligned MSS: %zd", frag_size);
+        debug("Fragments #: %d", frag_count);
+	debug("is_frag:     %d", is_frag);
+
+	if (is_frag && df_bit(buffer, len))
+		return send_icmp_pkt_to_big(w, max_len - sizeof(struct ether_header), buffer, len);
+
+	if (is_frag)
+                frag_id = uatomic_add_return(&wtp->fragment_id, 1);
+
+	debug("frag_id: %d", frag_id);
+
+	memset(chdr, 0, sizeof(chdr));
+
+	/* Version = 0, Type = 0, HLen = 8, RId = 1, WBID 802.11, 802.3 encoding */
+	((uint32_t *)chdr)[0] = htobe32((hlen << CAPWAP_HLEN_SHIFT) |
+					(1 << CAPWAP_RID_SHIFT) |
+					(CAPWAP_802_11_PAYLOAD << CAPWAP_WBID_SHIFT));
+	if (is_frag)
+		((uint32_t *)chdr)[0] |= CAPWAP_F_FRAG;
+	((uint32_t *)chdr)[1] = htobe32(frag_id << CAPWAP_FRAG_ID_SHIFT);
+
+	/* no RADIO MAC */
+	/* no WSI */
+
+	/* The message header contains parameters for sendmsg.    */
+	memset(&mh, 0, sizeof(mh));
+	mh.msg_name = (caddr_t)&wtp->addr;
+	mh.msg_namelen = sizeof(wtp->addr);
+	mh.msg_iov = iov;
+	mh.msg_iovlen = 2;
+
+	iov[0].iov_base = chdr;
+	iov[0].iov_len = hlen * 4;
+
+	iov[1].iov_base = (unsigned char *)buffer;
+	iov[1].iov_len = frag_size;
+
+	ssize_t offs = 0;
+
+	for (; frag_count > 0; frag_count--) {
+		debug("Id: %d, Count: %d", frag_id, frag_count);
+		if (caa_unlikely(is_frag)) {
+			SET_CAPWAP_HEADER_FIELD(&((uint32_t *)chdr)[1], offs / 8, CAPWAP_FRAG_OFFS_MASK, CAPWAP_FRAG_OFFS_SHIFT);
+			if (frag_count == 1) {
+				((uint32_t *)chdr)[0] |= CAPWAP_F_LASTFRAG;
+				iov[1].iov_len = len % frag_size;
+			}
+		}
+
+		/* FIXME: shortcat write, we do want to use NON-BLOCKING send here and
+		 *        switch to write_ev should it block....
+		 */
+		if ((r = sendmsg(w->capwap_fd, &mh, MSG_DONTWAIT)) < 0)
+			debug("sendmsg: %m");
+
+		debug("fwd tap sendmsg: %zd", r);
+
+		iov[1].iov_base += frag_size;
+		offs += frag_size;
+	}
+
+	return 1;
+}
+
+static int ieee8023_to_sta(struct worker *w, const unsigned char *mac, const unsigned char *buffer, ssize_t len)
+{
+	struct station *sta;
 	struct client *wtp = NULL;
-	/* struct ether_header *ether = (struct ether_header *)buffer; */
 
 	debug("STA MAC: " PRIsMAC, ARGsMAC(mac));
 
@@ -606,49 +1090,15 @@ static int ieee8023_to_sta(struct worker *w, const unsigned char *mac, const uns
 		/* the STA and WTP pointers are under RCU protection, so no-one will free them
 		 * as long as we hold the RCU read lock */
 
-		/* queue packet to WTP */
-
-		unsigned int hlen;
-		unsigned char chdr[32];
-
-		memset(chdr, 0, sizeof(chdr));
-
-		hlen = 2;
-
-		/* Version = 0, Type = 0, HLen = 8, RId = 1, no WBID, 802.3 encoding */
-		((uint32_t *)chdr)[0] = htobe32((hlen << CAPWAP_HLEN_SHIFT) | (1 < CAPWAP_RID_SHIFT));
-
-		/* Frag Id = 0, Frag Offset = 0 */
-		/* no RADIO MAC */
-		/* no WSI */
-
-		/* FIXME: shortcat write, we do want to use NON-BLOCKING send here and
-		 *        switch to write_ev should it block....
-		 */
-		iov[0].iov_base = chdr;
-		iov[0].iov_len = 8;
-		iov[1].iov_base = (unsigned char *)buffer;
-		iov[1].iov_len = len;
-
-		/* The message header contains parameters for sendmsg.    */
-		memset(&mh, 0, sizeof(mh));
-		mh.msg_name = (caddr_t)&wtp->addr;
-		mh.msg_namelen = sizeof(wtp->addr);
-		mh.msg_iov = iov;
-		mh.msg_iovlen = 2;
-
-		if ((r = sendmsg(w->capwap_fd, &mh, MSG_DONTWAIT)) < 0)
-			perror("sendmsg");
-
-		debug("fwd tap sendmsg: %zd", r);
 		debug("found STA %p, WTP %p", sta, wtp);
 
-		res = 1;
+		/* queue packet to WTP */
+		ieee8023_to_wtp(w, wtp, buffer, len);
 	}
 
 	rcu_read_unlock();
 
-	return res;
+	return 1;
 }
 
 static void tap_multicast(struct worker *w, unsigned char *buffer, ssize_t len)
@@ -832,6 +1282,9 @@ static void *worker_thread(void *arg)
 	setsockopt(w->capwap_fd, SOL_IP, IP_RECVERR, (char*)&on, sizeof(on));
 	if (v6only)
 		setsockopt(w->capwap_fd, SOL_IP, IPV6_V6ONLY,(char*)&on, sizeof(on));
+
+	on = IP_PMTUDISC_DO;
+	setsockopt(w->capwap_fd, SOL_IP, IP_MTU_DISCOVER,  (char*)&on, sizeof(on));
 
 	if (bind(w->capwap_fd, (struct sockaddr *)&saddr, saddr_len) < 0) {
 		perror("bind");
