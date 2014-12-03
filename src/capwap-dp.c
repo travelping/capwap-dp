@@ -305,10 +305,16 @@ static ETERM *erl_send_to(ETERM *tuple)
 	if ((clnt = find_wtp((struct sockaddr *)&addr)) != NULL) {
 		/* FIXME: queue request to WTP */
 
+		inet_ntop(clnt->addr.ss_family, SIN_ADDR_PTR(&clnt->addr), ipaddr, sizeof(ipaddr));
+		fprintf(stderr, "Client IP: %s:%d\n", ipaddr, ntohs(SIN_PORT(&clnt->addr)));
+
+		assert(memcmp(&addr, &clnt->addr, clnt->addr.ss_family == AF_INET ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6)) == 0);
+
 		r = sendto(workers[0].capwap_fd, ERL_BIN_PTR(msg), ERL_BIN_SIZE(msg),
 			   0, (struct sockaddr *)&clnt->addr, sizeof(clnt->addr));
 		fprintf(stderr, "erl_send_to: %zd\n", r);
-	}
+	} else
+		fprintf(stderr, "failed to find client: %p\n", clnt);
 
 	rcu_read_unlock();
 
