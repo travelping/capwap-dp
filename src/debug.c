@@ -14,6 +14,8 @@
 #include "config.h"
 #endif
 
+#include <assert.h>
+
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -28,8 +30,10 @@
 
 #if !defined(NDEBUG)
 
-static __thread char buf[4069];
+static __thread int save_errno;
+
 static __thread size_t pos = 0;
+static __thread char buf[128 * 1024];
 
 static __thread int ctime_last = 0;
 static __thread char ctime_buf[27];
@@ -52,6 +56,8 @@ void debug(const char *fmt, ...)
 
 void debug_head(struct timeval *tv)
 {
+	save_errno = errno;
+
         if (ctime_last != tv->tv_sec) {
                 ctime_r(&tv->tv_sec, ctime_buf);
                 ctime_last = tv->tv_sec;
@@ -64,9 +70,14 @@ void debug_log(const char *fmt, ...)
 {
         va_list args;
 
+	/* make sure %m gets the right errno */
+	errno = save_errno;
+
         va_start(args, fmt);
         pos += vsnprintf(buf + pos, sizeof(buf) - pos, fmt, args);
         va_end(args);
+
+	assert(pos < sizeof(buf));
 }
 
 void debug_flush()
@@ -77,6 +88,7 @@ void debug_flush()
 	if (write(STDERR_FILENO, buf, pos) < 0)
 		;
 	pos = 0;
+	errno = save_errno;
 }
 
 #endif
