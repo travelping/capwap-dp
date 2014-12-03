@@ -500,8 +500,11 @@ static ETERM *erl_detach_station(ETERM *tuple)
 	rcu_read_lock();
 
 	if ((sta = find_station(ether)) != NULL) {
-		detach_station_from_wtp(sta);
-		res = erl_mk_atom("ok");
+		if (cds_lfht_del(ht_stations, &sta->station_hash)) {
+			detach_station_from_wtp(sta);
+			res = erl_mk_atom("ok");
+		} else
+			res = erl_mk_atom("hash_corrupt");
 	} else
 		res = erl_mk_atom("not_found");
 

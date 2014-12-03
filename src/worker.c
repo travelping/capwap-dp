@@ -82,14 +82,14 @@ static inline void refcount_put_client(struct client *clnt)
 
 static void rcu_free_station(struct rcu_head *head)
 {
-	struct station *sta = caa_container_of(head, struct station, rcu_head);
+	struct station *sta = caa_container_of(head, struct station, rcu_free);
 	free(sta);
 }
 
 static void ref_free_station(struct urcu_ref *ref)
 {
 	struct station *sta = caa_container_of(ref, struct station, ref);
-	call_rcu(&sta->rcu_head, rcu_free_station);
+	call_rcu(&sta->rcu_free, rcu_free_station);
 }
 
 static inline void refcount_get_station(struct station *sta)
@@ -127,7 +127,7 @@ void attach_station_to_wtp(struct client *wtp, struct station *sta)
 
 static void rcu_release_wtp_from_sta(struct rcu_head *head)
 {
-	struct station *sta = caa_container_of(head, struct station, rcu_head);
+	struct station *sta = caa_container_of(head, struct station, rcu_release);
 
 	if (sta->wtp)
 		refcount_put_client(sta->wtp);
@@ -145,7 +145,7 @@ void detach_station_from_wtp(struct station *sta)
 	 * control thread is permitted to call this
 	 */
 	cds_hlist_del_rcu(&sta->wtp_list);
-	call_rcu(&sta->rcu_head, rcu_release_wtp_from_sta);
+	call_rcu(&sta->rcu_release, rcu_release_wtp_from_sta);
 }
 
 #if !defined(NDEBUG)

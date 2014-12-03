@@ -16,7 +16,8 @@ extern const char *fwd_ns;
 struct client;
 
 struct station {
-        struct rcu_head rcu_head;       /* For call_rcu() */
+        struct rcu_head rcu_free;          /* For call_rcu() */
+        struct rcu_head rcu_release;       /* For call_rcu() */
 	struct urcu_ref ref;
 	struct cds_lfht_node station_hash;
 	struct cds_hlist_node wtp_list;
