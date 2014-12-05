@@ -59,6 +59,7 @@ struct client {
 	struct sockaddr_storage addr;
 	unsigned int mtu;
 	uint16_t fragment_id;
+	unsigned int sta_count;
 	struct cds_hlist_head stations;
 	struct frgmt_buffer frgmt_buffer;
 };

@@ -28,6 +28,8 @@
 #include <netinet/ip.h>
 #include <netinet/udp.h>
 #include <netinet/ip_icmp.h>
+#include <netinet/ip6.h>
+#include <netinet/icmp6.h>
 #include <linux/errqueue.h>
 
 #include <ev.h>
@@ -116,6 +118,7 @@ void attach_station_to_wtp(struct client *wtp, struct station *sta)
 	refcount_get_client(wtp);
 
 	sta->wtp = wtp;
+	uatomic_inc(&wtp->sta_count);
 
 	/*
 	 * list mutating operations need mutal exclusion,
@@ -138,6 +141,8 @@ void detach_station_from_wtp(struct station *sta)
 {
 	if (!sta)
 		return;
+
+	uatomic_dec(&sta->wtp->sta_count);
 
 	/*
 	 * list mutating operations need mutal exclusion,
@@ -814,9 +819,6 @@ static int df_bit(const unsigned char *buffer, ssize_t len)
 {
 	struct ether_header *ether = (struct ether_header *)buffer;
 
-	if (!ETHER_IS_VALID_LEN(len) || len < sizeof(struct ether_header))
-		return 0;
-
 	switch (ntohs(ether->ether_type)) {
 	case ETHERTYPE_IP: {
 		ssize_t plen = len - sizeof(struct ether_header);
@@ -1101,6 +1103,26 @@ static int ieee8023_to_sta(struct worker *w, const unsigned char *mac, const uns
 	return 1;
 }
 
+static int ieee8023_bcast_to_wtps(struct worker *w, const unsigned char *buffer, ssize_t len)
+{
+        struct cds_lfht_iter iter;      /* For iteration on hash table */
+	struct client *wtp;
+
+	rcu_read_lock();
+
+        cds_lfht_for_each_entry(ht_clients, &iter, wtp, node) {
+		debug("WTP %p, stations: %d", wtp, uatomic_read(&wtp->sta_count));
+
+		if (uatomic_read(&wtp->sta_count) != 0)
+			/* queue packet to WTP */
+			ieee8023_to_wtp(w, wtp, buffer, len);
+	}
+
+	rcu_read_unlock();
+
+	return 1;
+}
+
 static void tap_multicast(struct worker *w, unsigned char *buffer, ssize_t len)
 {
 	struct ether_header *ether = (struct ether_header *)buffer;
@@ -1108,7 +1130,8 @@ static void tap_multicast(struct worker *w, unsigned char *buffer, ssize_t len)
 	debug("dst mcast ether: " PRIsMAC, ARGsMAC(ether->ether_dhost));
 	debug("ether mcast type: %04x", ntohs(ether->ether_type));
 
-	if (ETHER_IS_VALID_LEN(len) && ntohs(ether->ether_type) == ETHERTYPE_IP) {
+	switch (ntohs(ether->ether_type)) {
+	case ETHERTYPE_IP: {
 		ssize_t plen = len - sizeof(struct ether_header);
 		struct iphdr *ip = (struct iphdr *)(ether + 1);
 
@@ -1131,6 +1154,21 @@ static void tap_multicast(struct worker *w, unsigned char *buffer, ssize_t len)
 				}
 			}
 		}
+		break;
+	}
+	case ETHERTYPE_IPV6: {
+		ssize_t plen = len - sizeof(struct ether_header);
+		struct ip6_hdr *ip6 = (struct ip6_hdr *)(ether + 1);
+		struct icmp6_hdr *icmp = (struct icmp6_hdr *)(ip6 + 1);
+
+		if (plen >= (sizeof(struct ip6_hdr) + sizeof(struct icmp6_hdr)) &&
+		    ip6->ip6_nxt == IPPROTO_ICMPV6 && icmp->icmp6_type == ND_ROUTER_ADVERT)
+			if (ieee8023_bcast_to_wtps(w, buffer, len))
+				/* success */
+				return;
+
+		break;
+	}
 	}
 
 	packet_in_tap(buffer, len);
