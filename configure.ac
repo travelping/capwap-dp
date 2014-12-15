@@ -61,6 +61,7 @@ AC_CHECK_LIB([ev], [event_init],, AC_MSG_ERROR(Required library ev missing))
 AC_CHECK_LIB([pthread], [pthread_create],, AC_MSG_ERROR(Required library pthread missing))
 PKG_CHECK_MODULES([URCU], [liburcu],, AC_MSG_ERROR(Required library urcu missing))
 PKG_CHECK_MODULES([URCUCDS], [liburcu-cds],, AC_MSG_ERROR(Required library urcu-cds missing))
+PKG_CHECK_MODULES([LIBCONFIG], [libconfig >= 1.4],, AC_MSG_ERROR([libconfig++ 1.4 or newer not found.]))
 
 ERL_CRASH_DUMP=/dev/null
 EIBASE="`erl -noshell -noinput -eval 'io:format (\"~s\", [[ code:lib_dir (erl_interface) ]])' -s erlang halt`"

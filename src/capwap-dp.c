@@ -27,6 +27,8 @@
 #include <urcu/rculfhash.h>	/* RCU Lock-free hash table */
 #include "jhash.h"
 
+#include <libconfig.h>
+
 #include <ev.h>
 
 #include "erl_interface.h"
@@ -800,6 +802,7 @@ static int set_realtime_priority(void) {
 
 int node_name_long = 0;
 static char *node_name = NULL;
+static char *cookie = "cookie";
 
 static void dp_erl_connect(struct sockaddr_in *addr)
 {
@@ -852,7 +855,7 @@ static void dp_erl_connect(struct sockaddr_in *addr)
 	fprintf(stderr, "thisnodename:'%s'\n", thisnodename);
 
 	if (ei_connect_xinit(&ec, thishostname, thisalivename, thisnodename,
-			     &addr->sin_addr, "cookie", 0) < 0) {
+			     &addr->sin_addr, cookie, 0) < 0) {
 		fprintf(stderr,"ERROR when initializing: %d",erl_errno);
 		exit(EXIT_FAILURE);
 	}
@@ -902,6 +905,10 @@ int main(int argc, char *argv[])
 
 	int on = 1;
 
+	char *config_file = SYSCONFDIR "/capwap-dp.conf";
+
+	config_t cfg;
+
         int c;
 	socklen_t slen;
 
@@ -922,7 +929,7 @@ int main(int argc, char *argv[])
                         {0, 0, 0, 0}
                 };
 
-                c = getopt_long(argc, argv, "h46i:f:n:p:",
+                c = getopt_long(argc, argv, "c:h46i:f:n:p:",
                                 long_options, &option_index);
                 if (c == -1)
                         break;
@@ -965,6 +972,9 @@ int main(int argc, char *argv[])
 			v6only = 1;
 			break;
 
+		case 'c':
+			config_file = strdup(optarg);
+			break;
 /*
                 case 'i':
                         if (inet_aton(optarg, &addr.sin_addr) == 0) {
@@ -994,6 +1004,23 @@ int main(int argc, char *argv[])
                         printf("?? getopt returned character code 0%o ??\n", c);
                 }
         }
+
+	config_init(&cfg);
+
+	/* Read the file. If there is an error, report it and exit. */
+	if (!config_read_file(&cfg, config_file)) {
+		fprintf(stderr, "%s:%d - %s\n", config_error_file(&cfg),
+			config_error_line(&cfg), config_error_text(&cfg));
+		config_destroy(&cfg);
+		return(EXIT_FAILURE);
+	}
+
+	config_lookup_string(&cfg, "node.name", (const char **)&node_name);
+	config_lookup_string(&cfg, "node.cookie", (const char **)&cookie);
+
+	config_lookup_int(&cfg, "capwap.listen.port", &capwap_port);
+	config_lookup_string(&cfg, "capwap.listen.namespace", &capwap_ns);
+	config_lookup_string(&cfg, "capwap.forward.namespace", &fwd_ns);
 
 	if (!node_name)
 		node_name = strdup("capwap-dp");
