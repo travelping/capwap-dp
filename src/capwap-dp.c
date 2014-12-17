@@ -31,6 +31,10 @@
 
 #include <ev.h>
 
+#ifdef USE_SYSTEMD_DAEMON
+#include <systemd/sd-daemon.h>
+#endif
+
 #include "erl_interface.h"
 #include "ei.h"
 
@@ -1076,6 +1080,12 @@ int main(int argc, char *argv[])
 	ev_io_start(ctrl.loop, &ctrl.control_ev);
 
 	start_worker(8);
+
+#ifdef USE_SYSTEMD_DAEMON
+	/* Subsequent notifications will be ignored by systemd
+	 * and calling this function will clean up the env */
+	sd_notify(1, "READY=1");
+#endif
 
 	fprintf(stderr, "starting loop\n");
 	control_lock(ctrl.loop);

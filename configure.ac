@@ -63,6 +63,28 @@ PKG_CHECK_MODULES([URCU], [liburcu],, AC_MSG_ERROR(Required library urcu missing
 PKG_CHECK_MODULES([URCUCDS], [liburcu-cds],, AC_MSG_ERROR(Required library urcu-cds missing))
 PKG_CHECK_MODULES([LIBCONFIG], [libconfig >= 1.4],, AC_MSG_ERROR([libconfig++ 1.4 or newer not found.]))
 
+# Check whether to enable systemd startup notification.
+# This requires libsystemd-daemon.
+AC_ARG_WITH([systemd-daemon], AS_HELP_STRING([--with-systemd-daemon],
+	[Add support for systemd startup notification (default is autodetected)]),
+	[USE_SYSTEMD_DAEMON=$withval], [USE_SYSTEMD_DAEMON=auto])
+AS_IF([test "x$USE_SYSTEMD_DAEMON" != "xno"], [
+    PKG_CHECK_MODULES([SYSTEMD_DAEMON],
+        [libsystemd >= 209],
+        [have_systemd=yes],
+        [PKG_CHECK_MODULES([SYSTEMD_DAEMON],
+            [libsystemd-daemon >= 32],
+            [have_systemd=yes],
+            [have_systemd=no])])
+])
+
+AS_IF([test "x$have_systemd" = "xyes"],
+    [AC_DEFINE(USE_SYSTEMD_DAEMON,1,[Use systemd startup notification])])
+AM_CONDITIONAL(USE_SYSTEMD_DAEMON, [test "x$have_systemd" = "xyes"])
+
+AS_IF([test "x$USE_SYSTEMD_DAEMON" == "xyes" -a "x$have_systemd" != "xyes"],
+    [AC_MSG_ERROR([systemd startup notification support requested, but libsystemd-daemon not found.])])
+
 ERL_CRASH_DUMP=/dev/null
 EIBASE="`erl -noshell -noinput -eval 'io:format (\"~s\", [[ code:lib_dir (erl_interface) ]])' -s erlang halt`"
 AC_SUBST([EIBASE])
