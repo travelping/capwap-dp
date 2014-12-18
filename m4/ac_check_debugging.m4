@@ -39,7 +39,7 @@ else
     esac
 fi
 msg="enabled"
-AC_DEFINE(PTH_DEBUG, 1, [define to enable Pth debugging])
+AC_DEFINE(DEBUG, 1, [define to enable debugging])
 ],[
 if test ".$ac_cv_prog_gcc" = ".yes"; then
 case "$CFLAGS" in

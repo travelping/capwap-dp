@@ -85,6 +85,26 @@ AM_CONDITIONAL(USE_SYSTEMD_DAEMON, [test "x$have_systemd" = "xyes"])
 AS_IF([test "x$USE_SYSTEMD_DAEMON" == "xyes" -a "x$have_systemd" != "xyes"],
     [AC_MSG_ERROR([systemd startup notification support requested, but libsystemd-daemon not found.])])
 
+AC_ARG_WITH([systemd-journal], AS_HELP_STRING([--with-systemd-journal],
+        [Add support for systemd journal logging (default is autodetected)]),
+        [USE_SYSTEMD_JOURNAL=$withval], [USE_SYSTEMD_JOURNAL=auto])
+AS_IF([test "x$USE_SYSTEMD_JOURNAL" != "xno"], [
+    PKG_CHECK_MODULES([SYSTEMD_JOURNAL],
+        [libsystemd >= 209],
+        [have_systemd_journal=yes],
+        [PKG_CHECK_MODULES([SYSTEMD_JOURNAL],
+            [libsystemd-journal >= 38],
+            [have_systemd_journal=yes],
+            [have_systemd_journal=no])])
+])
+
+AS_IF([test "x$have_systemd_journal" = "xyes"],
+    [AC_DEFINE(USE_SYSTEMD_JOURNAL,1, [Use systemd journal logging])])
+AM_CONDITIONAL(USE_SYSTEMD_JOURNAL, [test "x$have_systemd_journal" = "xyes"])
+
+AS_IF([test "x$USE_SYSTEMD_JOURNAL" == "xyes" -a "x$have_systemd_journal" != "xyes"],
+    [AC_MSG_ERROR([systemd journal logging support requested, but libsystemd-journal not found.])])
+
 ERL_CRASH_DUMP=/dev/null
 EIBASE="`erl -noshell -noinput -eval 'io:format (\"~s\", [[ code:lib_dir (erl_interface) ]])' -s erlang halt`"
 AC_SUBST([EIBASE])

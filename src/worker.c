@@ -44,7 +44,7 @@
 #include "common.h"
 #include "ieee802_11_defs.h"
 
-#include "debug.h"
+#include "log.h"
 #include "capwap-dp.h"
 #include "netns.h"
 #include "dhcp_internal.h"
@@ -153,7 +153,7 @@ void detach_station_from_wtp(struct station *sta)
 	call_rcu(&sta->rcu_release, rcu_release_wtp_from_sta);
 }
 
-#if !defined(NDEBUG)
+#if defined(DEBUG)
 
 static void hexdump(const unsigned char *buf, ssize_t len)
 {
@@ -176,9 +176,7 @@ static void hexdump(const unsigned char *buf, ssize_t len)
 
 #else
 
-static inline void hexdump(const unsigned char *buf __attribute__((unused)), ssize_t len __attribute__((unused)))
-{
-}
+#define hexdump(buf, len) do {} while (0)
 
 #endif
 
@@ -242,12 +240,14 @@ static struct cds_lfht_node *get_wtp_node(const struct sockaddr *addr)
 {
 	struct cds_lfht_iter iter;
 	unsigned long hash;
-	char ipaddr[INET6_ADDRSTRLEN];
+	char ipaddr[INET6_ADDRSTRLEN] __attribute__((unused));
 
 	hash = hash_sockaddr(addr);
 
+#if defined(DEBUG)
 	inet_ntop(addr->sa_family, SIN_ADDR_PTR(addr), ipaddr, sizeof(ipaddr));
-	fprintf(stderr, "get_wtp_node IP: %s:%d, hash: 0x%08lx\n", ipaddr, ntohs(SIN_PORT(addr)), hash);
+	debug("get_wtp_node IP: %s:%d, hash: 0x%08lx\n", ipaddr, ntohs(SIN_PORT(addr)), hash);
+#endif
 
 	cds_lfht_lookup(ht_clients, hash, match_sockaddr, addr, &iter);
 	return cds_lfht_iter_get_node(&iter);
@@ -274,12 +274,14 @@ struct client *add_wtp(const struct sockaddr *addr, unsigned int mtu)
 {
 	struct client *wtp;
 	unsigned long hash;
-	char ipaddr[INET6_ADDRSTRLEN];
+	char ipaddr[INET6_ADDRSTRLEN] __attribute__((unused));
 
 	hash = hash_sockaddr((struct sockaddr *)addr);
 
+#if defined(DEBUG)
 	inet_ntop(addr->sa_family, SIN_ADDR_PTR(addr), ipaddr, sizeof(ipaddr));
-	fprintf(stderr, "add_wtp IP: %s:%d, hash: 0x%08lx\n", ipaddr, ntohs(SIN_PORT(addr)), hash);
+	debug("add_wtp IP: %s:%d, hash: 0x%08lx\n", ipaddr, ntohs(SIN_PORT(addr)), hash);
+#endif
 
 	if (!(wtp = calloc(1, sizeof(struct client))))
 	    return NULL;
@@ -471,7 +473,7 @@ static void handle_capwap_packet(struct worker *w, struct msghdr *msg, unsigned 
 	(in_range_s(s1, s2, e2) || in_range_e(e1, s2, e2) ||	\
 	 in_range_s(s2, s1, e1) || in_range_e(e2, s1, e1))
 
-#if !defined(NDEBUG)
+#if defined(DEBUG)
 
 static void debug_fragments(struct frgmt *f, const char *tag)
 {
@@ -489,9 +491,7 @@ static void debug_fragments(struct frgmt *f, const char *tag)
 
 #else
 
-static inline void debug_fragments(struct frgmt *f __attribute__((unused)), const char *tag __attribute__((unused)))
-{
-}
+#define debug_fragments(f, tag) do {} while (0)
 
 #endif
 
@@ -658,15 +658,17 @@ static void handle_capwap_fragment(struct worker *w, struct msghdr *msg, unsigne
 
 static void capwap_recv(struct worker *w, struct msghdr *msg, unsigned char *buffer, unsigned int len)
 {
-	char ipaddr[INET6_ADDRSTRLEN];
+	char ipaddr[INET6_ADDRSTRLEN] __attribute__((unused));
 	const struct sockaddr *addr = (struct sockaddr *)msg->msg_name;
 
 	unsigned int hlen;
 
+#if defined(DEBUG)
 	inet_ntop(addr->sa_family, SIN_ADDR_PTR(addr), ipaddr, sizeof(ipaddr));
 	debug("read %d bytes from %s:%d",
 	      len, ipaddr, ntohs(SIN_PORT(addr)));
 	hexdump(buffer, len);
+#endif
 
 	if (len < CAPWAP_HEADER_LEN)
 		return;

@@ -38,6 +38,7 @@
 #include "erl_interface.h"
 #include "ei.h"
 
+#include "log.h"
 #include "capwap-dp.h"
 #include "netns.h"
 
@@ -1084,10 +1085,13 @@ int main(int argc, char *argv[])
 #ifdef USE_SYSTEMD_DAEMON
 	/* Subsequent notifications will be ignored by systemd
 	 * and calling this function will clean up the env */
-	sd_notify(1, "READY=1");
+	if (sd_notify(0, "READY=1") <= 0) {
+		log(LOG_INFO, "starting loop");
+	}
+#else
+	log(LOG_INFO, "starting loop");
 #endif
 
-	fprintf(stderr, "starting loop\n");
 	control_lock(ctrl.loop);
 	pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, 0);
 	ev_run(ctrl.loop, 0);

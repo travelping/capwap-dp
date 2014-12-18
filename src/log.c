@@ -26,9 +26,9 @@
 #include <pthread.h>
 #include <sys/time.h>
 
-#include "debug.h"
+#include "log.h"
 
-#if !defined(NDEBUG)
+#if defined(DEBUG)
 
 static __thread int save_errno;
 
@@ -38,14 +38,14 @@ static __thread char buf[128 * 1024];
 static __thread int ctime_last = 0;
 static __thread char ctime_buf[27];
 
-void debug(const char *fmt, ...)
+void _debug(const char *filename, int line, const char *func, const char *fmt, ...)
 {
         va_list args;
 	struct timeval tv;
 
 	gettimeofday(&tv, NULL);
 
-	debug_head(&tv);
+	_debug_head(filename, line, func, &tv);
 
         va_start(args, fmt);
         pos += vsnprintf(buf + pos, sizeof(buf) - pos, fmt, args);
@@ -54,7 +54,7 @@ void debug(const char *fmt, ...)
 	debug_flush();
 }
 
-void debug_head(struct timeval *tv)
+void _debug_head(const char *filename, int line, const char *func, struct timeval *tv)
 {
 	save_errno = errno;
 
@@ -63,7 +63,9 @@ void debug_head(struct timeval *tv)
                 ctime_last = tv->tv_sec;
         }
 
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "%.15s.%03ld [%lX]: ", &ctime_buf[4], tv->tv_usec / 1000, pthread_self());
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "%.15s.%03ld %s:%d:%s [%lX]: ",
+			&ctime_buf[4], tv->tv_usec / 1000,
+			filename, line, func, pthread_self());
 }
 
 void debug_log(const char *fmt, ...)
