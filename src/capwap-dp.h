@@ -49,6 +49,11 @@ struct station {
 
 	struct client *wtp;
 	uint8_t ether[ETH_ALEN];
+
+	unsigned long rcvd_pkts;
+	unsigned long send_pkts;
+	unsigned long rcvd_bytes;
+	unsigned long send_bytes;
 };
 
 struct client {
@@ -62,6 +67,20 @@ struct client {
 	unsigned int sta_count;
 	struct cds_hlist_head stations;
 	struct frgmt_buffer frgmt_buffer;
+
+	unsigned long rcvd_pkts;
+	unsigned long send_pkts;
+	unsigned long rcvd_bytes;
+	unsigned long send_bytes;
+
+	unsigned long rcvd_fragments;
+	unsigned long send_fragments;
+
+	unsigned long err_invalid_station;
+	unsigned long err_hdr_length_invalid;
+	unsigned long err_too_short;
+	unsigned long err_fragment_invalid;
+	unsigned long err_fragment_too_old;
 };
 
 struct worker {

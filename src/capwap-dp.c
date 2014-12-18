@@ -21,6 +21,7 @@
 #include <getopt.h>
 
 #include <urcu.h>               /* RCU flavor */
+#include <urcu/uatomic.h>
 #include <urcu/ref.h>		/* ref counting */
 #include <urcu/rculist.h>       /* RCU list */
 #include <urcu/rculfqueue.h>    /* RCU Lock-free queue */
@@ -231,19 +232,45 @@ static ETERM *ether2bin(uint8_t *ether)
 static ETERM *wtp2term(struct client *clnt)
 {
 	struct station *sta;
-	ETERM *wtp[4];
+	ETERM *wtp[5];
+	ETERM *wtp_cnt[] = {
+		erl_mk_longlong(uatomic_read(&clnt->rcvd_pkts)),
+		erl_mk_longlong(uatomic_read(&clnt->send_pkts)),
+		erl_mk_longlong(uatomic_read(&clnt->rcvd_bytes)),
+		erl_mk_longlong(uatomic_read(&clnt->send_bytes)),
+
+		erl_mk_longlong(uatomic_read(&clnt->rcvd_fragments)),
+		erl_mk_longlong(uatomic_read(&clnt->send_fragments)),
+
+		erl_mk_longlong(uatomic_read(&clnt->err_invalid_station)),
+		erl_mk_longlong(uatomic_read(&clnt->err_hdr_length_invalid)),
+		erl_mk_longlong(uatomic_read(&clnt->err_too_short)),
+		erl_mk_longlong(uatomic_read(&clnt->err_fragment_invalid)),
+		erl_mk_longlong(uatomic_read(&clnt->err_fragment_too_old))
+	};
 
 	wtp[0] = sockaddr2term((struct sockaddr *)&clnt->addr);
 	wtp[1] = erl_mk_empty_list();
 	wtp[2] = erl_mk_int(clnt->ref.refcount);
 	wtp[3] = erl_mk_int(clnt->mtu);
+	wtp[4] = erl_mk_tuple(wtp_cnt, CAA_ARRAY_SIZE(wtp_cnt));
 
         cds_hlist_for_each_entry_rcu_2(sta, &clnt->stations, wtp_list) {
-		ETERM *mac = ether2bin(sta->ether);
-		wtp[1] = erl_cons(mac, wtp[1]);
+		ETERM *esta[2];
+		ETERM *esta_cnt[] = {
+			erl_mk_longlong(uatomic_read(&sta->rcvd_pkts)),
+			erl_mk_longlong(uatomic_read(&sta->send_pkts)),
+			erl_mk_longlong(uatomic_read(&sta->rcvd_bytes)),
+			erl_mk_longlong(uatomic_read(&sta->send_bytes))
+		};
+
+		esta[0] = ether2bin(sta->ether);
+		esta[1] = erl_mk_tuple(esta_cnt, CAA_ARRAY_SIZE(esta_cnt));
+
+		wtp[1] = erl_cons(erl_mk_tuple(esta, CAA_ARRAY_SIZE(esta)), wtp[1]);
 	}
 
-	return erl_mk_tuple(wtp, 4);
+	return erl_mk_tuple(wtp, CAA_ARRAY_SIZE(wtp));
 }
 
 static void async_reply(struct controller *cnt, ETERM *from, ETERM *resp)
