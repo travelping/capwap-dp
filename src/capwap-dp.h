@@ -104,6 +104,8 @@ int delete_wtp(const struct sockaddr *);
 
 int __delete_wtp(struct client *wtp);
 
+void capwap_socket_error(int origin, int type, const struct sockaddr *addr);
+
 /**
  * CAPWAP Transport Header
  *

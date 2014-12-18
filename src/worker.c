@@ -1069,7 +1069,7 @@ static int ieee8023_to_wtp(struct worker *w, struct client *wtp, const unsigned 
 
 		debug("fwd tap sendmsg: %zd", r);
 
-		iov[1].iov_base += frag_size;
+		iov[1].iov_base = (unsigned char *)iov[1].iov_base + frag_size;
 		offs += frag_size;
 	}
 
@@ -1229,7 +1229,7 @@ static void ev_unlock(EV_P)
 	pthread_mutex_unlock (&w->loop_lock);
 }
 
-int tap_alloc(char *dev)
+static int tap_alloc(char *dev)
 {
 	struct ifreq ifr;
 	int fd, err;

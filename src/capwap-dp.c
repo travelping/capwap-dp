@@ -159,7 +159,7 @@ out:
 	return res;
 }
 
-ETERM *sockaddr2term(const struct sockaddr *addr)
+static ETERM *sockaddr2term(const struct sockaddr *addr)
 {
 	char ipaddr[INET6_ADDRSTRLEN];
 	ETERM *eaddr[2];
@@ -207,7 +207,7 @@ ETERM *sockaddr2term(const struct sockaddr *addr)
 	return erl_mk_tuple(eaddr, 2);
 }
 
-int bin2ether(ETERM *ea, uint8_t *ether)
+static int bin2ether(ETERM *ea, uint8_t *ether)
 {
 	int res = 0;
 
@@ -222,12 +222,12 @@ out:
 	return res;
 }
 
-ETERM *ether2bin(uint8_t *ether)
+static ETERM *ether2bin(uint8_t *ether)
 {
 	return erl_mk_binary((char *)ether, ETH_ALEN);
 }
 
-ETERM *wtp2term(struct client *clnt)
+static ETERM *wtp2term(struct client *clnt)
 {
 	struct station *sta;
 	ETERM *wtp[4];
