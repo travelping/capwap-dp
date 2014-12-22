@@ -52,6 +52,7 @@
 #define PRIsMAC "%02x:%02x:%02x:%02x:%02x:%02x"
 #define ARGsMAC(m) (m)[0], (m)[1], (m)[2], (m)[3], (m)[4], (m)[5]
 
+int num_workers;
 struct worker *workers;
 
 struct cds_lfht *ht_stations;	/* Hash table */
@@ -59,6 +60,40 @@ struct cds_lfht *ht_clients;	/* Hash table */
 
 static int capwap_ns_fd = 0;
 static int fwd_ns_fd = 0;
+
+static unsigned long get_ts()
+{
+	struct timespec monotime;
+	clock_gettime(CLOCK_MONOTONIC_COARSE, &monotime);
+
+	return monotime.tv_sec * 1000 + monotime.tv_nsec / 10000000;
+}
+
+static int ratelimit(struct ratelimit *rs)
+{
+	unsigned long ts;
+
+	if (!rs->interval)
+		return 1;
+
+	ts = get_ts();
+
+	if (!rs->begin)
+		rs->begin = ts;
+
+	if (rs->begin + rs->interval < ts) {
+		rs->begin = 0;
+		rs->done = 0;
+	}
+	if (rs->bucket && rs->bucket > rs->done)
+		goto doit;
+
+	return 0;
+
+doit:
+	rs->done++;
+	return 1;
+}
 
 static void rcu_free_client(struct rcu_head *head)
 {
@@ -154,6 +189,8 @@ void detach_station_from_wtp(struct station *sta)
 }
 
 #if defined(DEBUG)
+
+#warning "debug is on"
 
 static void hexdump(const unsigned char *buf, ssize_t len)
 {
@@ -373,7 +410,9 @@ unsigned long hash_sockaddr(const struct sockaddr *addr)
 	return jhash(addr, sizeof(addr), 0);
 }
 
-static void forward_capwap(struct worker *w, struct client *wtp, const struct sockaddr *addr, struct ether_header *ether, unsigned char *data, unsigned int len)
+static void forward_capwap(struct worker *w, struct client *wtp, const struct sockaddr *addr,
+			   const unsigned char *radio_mac, unsigned int radio_mac_len,
+			   struct ether_header *ether, unsigned char *data, unsigned int len)
 {
 	struct station *sta;
 	struct iovec iov[2];
@@ -403,12 +442,27 @@ static void forward_capwap(struct worker *w, struct client *wtp, const struct so
 			debug("writev: %m");
 		}
 		debug("fwd CW writev: %d", r);
+	}
+	else if (radio_mac_len == sizeof(ether->ether_shost) && memcmp(radio_mac, ether->ether_shost, radio_mac_len) == 0) {
+		debug("got CAPWAP DP from RADIO MAC ("PRIsMAC"), ignoring", ARGsMAC(ether->ether_shost));
 	} else {
+		uatomic_inc(&w->err_invalid_station);
 		uatomic_inc(&wtp->err_invalid_station);
 		debug("got CAPWAP DP from unknown station " PRIsMAC, ARGsMAC(ether->ether_shost));
 	}
 
 	rcu_read_unlock();
+}
+
+static void handle_capwap_keep_alive(struct worker *w, struct client *wtp, struct msghdr *msg,
+				     unsigned char *buffer, unsigned int len)
+{
+	const struct sockaddr *addr = (struct sockaddr *)msg->msg_name;
+
+	if (wtp || (!wtp && ratelimit(&w->unknown_wtp_limit)))
+		capwap_in(addr, NULL, 0, buffer, len);
+	else
+		uatomic_inc(&w->ratelimit_unknown_wtp);
 }
 
 static void handle_capwap_packet(struct worker *w, struct client *wtp, struct msghdr *msg, unsigned char *buffer, unsigned int len)
@@ -419,15 +473,22 @@ static void handle_capwap_packet(struct worker *w, struct client *wtp, struct ms
 	unsigned int datalen = len - hlen;
 
 	unsigned int wbid;
+	unsigned int radio_mac_len = 0;
+	unsigned char *radio_mac = NULL;
 
 	if (GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_F_TYPE, 0))
 		wbid = GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_WBID_MASK, CAPWAP_WBID_SHIFT);
 	else
 		wbid = CAPWAP_802_3_PAYLOAD;
 
+	if (GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_F_RMAC, 0)) {
+		radio_mac_len = *(uint8_t *)(buffer + 8);
+		radio_mac = (uint8_t *)(buffer + 9);
+	}
+
 	switch (wbid) {
 	case CAPWAP_802_3_PAYLOAD:
-		forward_capwap(w, wtp, addr, (struct ether_header *)data, data + ETH_ALEN * 2, datalen - ETH_ALEN * 2);
+		forward_capwap(w, wtp, addr, radio_mac, radio_mac_len, (struct ether_header *)data, data + ETH_ALEN * 2, datalen - ETH_ALEN * 2);
 		break;
 
 	case CAPWAP_802_11_PAYLOAD: {
@@ -440,7 +501,7 @@ static void handle_capwap_packet(struct worker *w, struct client *wtp, struct ms
 		if (WLAN_FC_GET_TYPE(fc) == WLAN_FC_TYPE_MGMT) {
 			/* push mgmt to controller */
 			debug("management frame");
-			capwap_in(addr, buffer, len);
+			capwap_in(addr, radio_mac, radio_mac_len, buffer, len);
 			return;
 		}
 		else if (WLAN_FC_GET_TYPE(fc) == WLAN_FC_TYPE_DATA &&
@@ -452,7 +513,7 @@ static void handle_capwap_packet(struct worker *w, struct client *wtp, struct ms
 			ether = (struct ether_header *)&hdr->addr1;
 			memcpy(&ether->ether_shost, &hdr->addr3, ETH_ALEN);
 
-			forward_capwap(w, wtp, addr, ether, data + sizeof(struct ieee80211_hdr), datalen - sizeof(struct ieee80211_hdr));
+			forward_capwap(w, wtp, addr, radio_mac, radio_mac_len, ether, data + sizeof(struct ieee80211_hdr), datalen - sizeof(struct ieee80211_hdr));
 		} else {
 			/* wrong direction / unknown / unhandled WLAN frame - ignore */
 			debug("ignoring: type %d, To/From %d", WLAN_FC_GET_TYPE(fc), (fc & (WLAN_FC_TODS | WLAN_FC_FROMDS)));
@@ -610,12 +671,15 @@ static void handle_capwap_fragment(struct worker *w, struct client *wtp, struct 
 
 	if ((!last && (datalen % 8) != 0) || end > FRGMT_BUFFER) {
 		debug("invalid fragment, size %d, end %d", datalen, end);
+		uatomic_inc(&w->err_fragment_invalid);
 		uatomic_inc(&wtp->err_fragment_invalid);
 		return;
 	}
 
-	if (start == 0)
+	if (start == 0) {
+		uatomic_inc(&w->rcvd_fragments);
 		uatomic_inc(&wtp->rcvd_fragments);
+	}
 
 	pthread_mutex_lock(&wtp->frgmt_buffer.lock);
 
@@ -628,6 +692,7 @@ static void handle_capwap_fragment(struct worker *w, struct client *wtp, struct 
 	if (id < wtp->frgmt_buffer.base) {
 		/* fragment to old */
 		debug("Fragment too old");
+		uatomic_inc(&w->err_fragment_too_old);
 		uatomic_inc(&wtp->err_fragment_too_old);
 		return;
 	}
@@ -673,27 +738,39 @@ static void capwap_recv(struct worker *w, struct msghdr *msg, unsigned char *buf
 #endif
 
 	rcu_read_lock();
-	if (!(wtp = find_wtp(addr))) {
-		/* TODO: account against global error counter */
-		goto out_unlock;
-	}
+	wtp = find_wtp(addr);
 
-	uatomic_inc(&wtp->rcvd_pkts);
-	uatomic_add(&wtp->rcvd_bytes, len);
+	uatomic_inc(&w->rcvd_pkts);
+	uatomic_add(&w->rcvd_bytes, len);
 
 	if (len < CAPWAP_HEADER_LEN) {
-		uatomic_inc(&wtp->err_hdr_length_invalid);
+		debug("capwap packet shorter than header");
+		uatomic_inc(&w->err_hdr_length_invalid);
 		goto out_unlock;
 	}
 
 	hlen = GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_HLEN_MASK, CAPWAP_HLEN_SHIFT) * 4;
 	if (len < hlen) {
-		uatomic_inc(&wtp->err_too_short);
+		debug("capwap packet shorter than length in header");
+		uatomic_inc(&w->err_too_short);
 		goto out_unlock;
 	}
 
+	wtp = find_wtp(addr);
+	if (wtp) {
+		uatomic_inc(&wtp->rcvd_pkts);
+		uatomic_add(&wtp->rcvd_bytes, len);
+	}
+
 	if (GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_F_K, 0)) {
-		capwap_in(addr, buffer, len);
+		debug("capwap keep-alive packet");
+		handle_capwap_keep_alive(w, wtp, msg, buffer, len);
+		goto out_unlock;
+	}
+
+	/* non keep-alives from unknown WTP's are not permitted */
+	if (!wtp) {
+		uatomic_inc(&w->err_invalid_wtp);
 		goto out_unlock;
 	}
 
@@ -1051,6 +1128,7 @@ static int ieee8023_to_wtp(struct worker *w, struct client *wtp, const unsigned 
 					(CAPWAP_802_11_PAYLOAD << CAPWAP_WBID_SHIFT));
 	if (is_frag) {
 		((uint32_t *)chdr)[0] |= CAPWAP_F_FRAG;
+		uatomic_inc(&w->send_fragments);
 		uatomic_inc(&wtp->send_fragments);
 	}
 	((uint32_t *)chdr)[1] = htobe32(frag_id << CAPWAP_FRAG_ID_SHIFT);
@@ -1083,7 +1161,9 @@ static int ieee8023_to_wtp(struct worker *w, struct client *wtp, const unsigned 
 			}
 		}
 
+		uatomic_inc(&w->send_pkts);
 		uatomic_inc(&wtp->send_pkts);
+		uatomic_add(&w->send_bytes, iov[0].iov_len + iov[1].iov_len);
 		uatomic_add(&wtp->send_bytes, iov[0].iov_len + iov[1].iov_len);
 
 		/* FIXME: shortcat write, we do want to use NON-BLOCKING send here and
@@ -1411,8 +1491,12 @@ int start_worker(size_t count)
 	if (fwd_ns)
 		fwd_ns_fd = get_nsfd(fwd_ns);
 
+	num_workers = count;
 	for (int i = 0; i < count; i++) {
 		workers[i].id = i;
+		workers[i].unknown_wtp_limit.interval = unknown_wtp_limit_interval;
+		workers[i].unknown_wtp_limit.bucket = unknown_wtp_limit_bucket;
+
 		if ((workers[i].tap_fd = tap_alloc(tap_dev)) < 0)
 			return 0;
 		pthread_create(&workers[i].tid, NULL, worker_thread, (void *)&workers[i]);

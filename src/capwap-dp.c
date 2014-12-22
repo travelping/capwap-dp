@@ -243,8 +243,6 @@ static ETERM *wtp2term(struct client *clnt)
 		erl_mk_longlong(uatomic_read(&clnt->send_fragments)),
 
 		erl_mk_longlong(uatomic_read(&clnt->err_invalid_station)),
-		erl_mk_longlong(uatomic_read(&clnt->err_hdr_length_invalid)),
-		erl_mk_longlong(uatomic_read(&clnt->err_too_short)),
 		erl_mk_longlong(uatomic_read(&clnt->err_fragment_invalid)),
 		erl_mk_longlong(uatomic_read(&clnt->err_fragment_too_old))
 	};
@@ -440,8 +438,7 @@ static ETERM *erl_list_wtp(ETERM *tuple)
 
         rcu_read_lock();
         cds_lfht_for_each_entry(ht_clients, &iter, clnt, node) {
-		ETERM *ip = sockaddr2term((struct sockaddr *)&clnt->addr);
-		list = erl_cons(ip, list);
+		list = erl_cons(wtp2term(clnt), list);
         }
         rcu_read_unlock();
 
@@ -556,6 +553,35 @@ static ETERM *erl_detach_station(ETERM *tuple)
 	return res;
 }
 
+static ETERM *erl_get_stats()
+{
+	ETERM *res;
+
+	res = erl_mk_empty_list();
+	for (int i = 0; i < num_workers; i++) {
+		ETERM *w[] = {
+			erl_mk_longlong(uatomic_read(&workers[i].rcvd_pkts)),
+			erl_mk_longlong(uatomic_read(&workers[i].send_pkts)),
+			erl_mk_longlong(uatomic_read(&workers[i].rcvd_bytes)),
+			erl_mk_longlong(uatomic_read(&workers[i].send_bytes)),
+
+			erl_mk_longlong(uatomic_read(&workers[i].rcvd_fragments)),
+			erl_mk_longlong(uatomic_read(&workers[i].send_fragments)),
+
+			erl_mk_longlong(uatomic_read(&workers[i].err_invalid_station)),
+			erl_mk_longlong(uatomic_read(&workers[i].err_fragment_invalid)),
+			erl_mk_longlong(uatomic_read(&workers[i].err_fragment_too_old)),
+
+			erl_mk_longlong(uatomic_read(&workers[i].err_invalid_wtp)),
+			erl_mk_longlong(uatomic_read(&workers[i].err_hdr_length_invalid)),
+			erl_mk_longlong(uatomic_read(&workers[i].err_too_short)),
+			erl_mk_longlong(uatomic_read(&workers[i].ratelimit_unknown_wtp))
+		};
+
+		res = erl_cons(erl_mk_tuple(w, CAA_ARRAY_SIZE(w)), res);
+	}
+	return res;
+}
 static ETERM *handle_gen_call_capwap(struct controller *cnt, const char *fn, ETERM *tuple)
 {
 	if (strncmp(fn, "sendto", 6) == 0) {
@@ -584,6 +610,9 @@ static ETERM *handle_gen_call_capwap(struct controller *cnt, const char *fn, ETE
 	}
 	else if (strncmp(fn, "detach_station", 14) == 0) {
 		return erl_detach_station(tuple);
+	}
+	else if (strncmp(fn, "get_stats", 9) == 0) {
+		return erl_get_stats(tuple);
 	}
 	else
 		return erl_mk_atom("error");
@@ -781,7 +810,9 @@ void capwap_socket_error(int origin, int type, const struct sockaddr *addr)
 	control_enqueue(erl_mk_tuple(msg, 4));
 }
 
-void capwap_in(const struct sockaddr *addr, const unsigned char *buf, ssize_t len)
+void capwap_in(const struct sockaddr *addr,
+	       const unsigned char *radio_mac, unsigned int radio_mac_len,
+	       const unsigned char *buf, ssize_t len)
 {
 	ETERM *msg[3];
 
@@ -923,6 +954,9 @@ int capwap_port = 5247;
 const char *capwap_ns = NULL;
 const char *fwd_ns = NULL;
 
+int unknown_wtp_limit_interval = 1000;
+int unknown_wtp_limit_bucket = 30;
+
 int main(int argc, char *argv[])
 {
         const struct rlimit rlim = {
@@ -936,6 +970,7 @@ int main(int argc, char *argv[])
 	};
 
 	int on = 1;
+	int cfg_num_workers = 8;
 
 	char *config_file = SYSCONFDIR "/capwap-dp.conf";
 
@@ -1054,6 +1089,11 @@ int main(int argc, char *argv[])
 	config_lookup_string(&cfg, "capwap.listen.namespace", &capwap_ns);
 	config_lookup_string(&cfg, "capwap.forward.namespace", &fwd_ns);
 
+	config_lookup_int(&cfg, "capwap.ratelimit.unknown-wtp.interval", &unknown_wtp_limit_interval);
+	config_lookup_int(&cfg, "capwap.ratelimit.unknown-wtp.bucket", &unknown_wtp_limit_bucket);
+
+	config_lookup_int(&cfg, "capwap.workers", &cfg_num_workers);
+
 	if (!node_name)
 		node_name = strdup("capwap-dp");
 
@@ -1107,7 +1147,7 @@ int main(int argc, char *argv[])
 	ev_io_init(&ctrl.control_ev, control_cb, ctrl.listen_fd, EV_READ);
 	ev_io_start(ctrl.loop, &ctrl.control_ev);
 
-	start_worker(8);
+	start_worker(cfg_num_workers);
 
 #ifdef USE_SYSTEMD_DAEMON
 	/* Subsequent notifications will be ignored by systemd

@@ -13,9 +13,20 @@ extern int capwap_port;
 extern const char *capwap_ns;
 extern const char *fwd_ns;
 
+extern int unknown_wtp_limit_interval;
+extern int unknown_wtp_limit_bucket;
+
 #define MAX_FRAGMENTS 32
 #define FRGMT_BUFFER (8 * 1024)
 #define FRGMT_MAX 16
+
+struct ratelimit {
+	int interval;
+	int bucket;
+	int done;
+	int missed;
+        unsigned long begin;
+};
 
 struct frgmt {
 	unsigned int fragment_id;
@@ -77,8 +88,6 @@ struct client {
 	unsigned long send_fragments;
 
 	unsigned long err_invalid_station;
-	unsigned long err_hdr_length_invalid;
-	unsigned long err_too_short;
 	unsigned long err_fragment_invalid;
 	unsigned long err_fragment_too_old;
 };
@@ -96,8 +105,28 @@ struct worker {
 
 	int tap_fd;
 	int capwap_fd;
+
+	struct ratelimit unknown_wtp_limit;
+
+	unsigned long rcvd_pkts;
+	unsigned long send_pkts;
+	unsigned long rcvd_bytes;
+	unsigned long send_bytes;
+
+	unsigned long rcvd_fragments;
+	unsigned long send_fragments;
+
+	unsigned long err_invalid_station;
+	unsigned long err_fragment_invalid;
+	unsigned long err_fragment_too_old;
+
+	unsigned long err_invalid_wtp;
+	unsigned long err_hdr_length_invalid;
+	unsigned long err_too_short;
+	unsigned long ratelimit_unknown_wtp;
 };
 
+extern int num_workers;
 extern struct worker *workers;
 
 extern struct cds_lfht *ht_stations;	/* Hash table */
@@ -107,7 +136,7 @@ extern struct cds_lfht *ht_clients;	/* Hash table */
 #define SIN_PORT(addr) ((((struct sockaddr *)(addr))->sa_family == AF_INET) ? (((struct sockaddr_in *)(addr))->sin_port) : (((struct sockaddr_in6 *)(addr))->sin6_port))
 
 void packet_in_tap(const unsigned char *, ssize_t);
-void capwap_in(const struct sockaddr *, const unsigned char *, ssize_t);
+void capwap_in(const struct sockaddr *, const unsigned char *, unsigned int, const unsigned char *, ssize_t);
 
 int start_worker(size_t);
 unsigned long hash_sockaddr(const struct sockaddr *);
