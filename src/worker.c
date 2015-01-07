@@ -996,7 +996,8 @@ static int send_icmp_pkt_to_big(struct worker *w, unsigned int mtu, const unsign
 	int r __attribute__((unused));
 
         /* No replies to physical multicast/broadcast */
-	if (ether_in->ether_dhost[5] & 0x02)
+	debug("ether_dhost: 0x%02x, %d", ether_in->ether_dhost[0], ether_in->ether_dhost[0] & 0x01);
+	if (ether_in->ether_dhost[0] & 0x01)
 		return 1;
 
 	memset(&b, 0, sizeof(b));
@@ -1009,6 +1010,8 @@ static int send_icmp_pkt_to_big(struct worker *w, unsigned int mtu, const unsign
 	memcpy(ether_out->ether_dhost, ether_in->ether_shost, sizeof(ether_out->ether_dhost));
 	memcpy(ether_out->ether_shost, ether_in->ether_dhost, sizeof(ether_out->ether_shost));
 	ether_out->ether_type = ether_in->ether_type;
+
+	debug("ether_type: %d", ntohs(ether_in->ether_type));
 
 	switch (ntohs(ether_in->ether_type)) {
 	case ETHERTYPE_IP: {
@@ -1111,6 +1114,7 @@ static int ieee8023_to_wtp(struct worker *w, struct client *wtp, const unsigned 
         debug("Aligned MSS: %zd", frag_size);
         debug("Fragments #: %d", frag_count);
 	debug("is_frag:     %d", is_frag);
+	debug("df_bit:      %d", df_bit(buffer, len));
 
 	if (is_frag && df_bit(buffer, len))
 		return send_icmp_pkt_to_big(w, max_len - sizeof(struct ether_header), buffer, len);
