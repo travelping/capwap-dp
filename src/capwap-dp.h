@@ -25,20 +25,20 @@ struct ratelimit {
 	int bucket;
 	int done;
 	int missed;
-        unsigned long begin;
+	unsigned long begin;
 };
 
 struct frgmt {
 	unsigned int fragment_id;
 
-        unsigned int count;
-        struct {
-                unsigned int start;
-                unsigned int end;
-        } parts[FRGMT_MAX];
+	unsigned int count;
+	struct {
+		unsigned int start;
+		unsigned int end;
+	} parts[FRGMT_MAX];
 
-        unsigned int hdrlen;
-        unsigned int length;
+	unsigned int hdrlen;
+	unsigned int length;
 
 	unsigned char buffer[FRGMT_BUFFER];
 };
@@ -52,8 +52,8 @@ struct frgmt_buffer {
 struct client;
 
 struct station {
-        struct rcu_head rcu_free;          /* For call_rcu() */
-        struct rcu_head rcu_release;       /* For call_rcu() */
+	struct rcu_head rcu_free;          /* For call_rcu() */
+	struct rcu_head rcu_release;       /* For call_rcu() */
 	struct urcu_ref ref;
 	struct cds_lfht_node station_hash;
 	struct cds_hlist_node wtp_list;
@@ -68,7 +68,7 @@ struct station {
 };
 
 struct client {
-        struct rcu_head rcu_head;       /* For call_rcu() */
+	struct rcu_head rcu_head;       /* For call_rcu() */
 	struct urcu_ref ref;
 	struct cds_lfht_node node;
 

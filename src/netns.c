@@ -44,12 +44,12 @@ int switch_ns(int nsfd, sigset_t *oldmask)
 	sigfillset(&intmask);
 	sigprocmask(SIG_BLOCK, &intmask, oldmask);
 
-        return setns(nsfd, CLONE_NEWNET);
+	return setns(nsfd, CLONE_NEWNET);
 }
 
 void restore_ns(sigset_t *oldmask)
 {
-        setns(default_nsfd, CLONE_NEWNET);
+	setns(default_nsfd, CLONE_NEWNET);
 
 	sigprocmask(SIG_SETMASK, oldmask, NULL);
 }
@@ -57,41 +57,41 @@ void restore_ns(sigset_t *oldmask)
 int open_ns(int nsfd, const char *pathname, int flags)
 {
 	sigset_t intmask, oldmask;
-        int fd;
+	int fd;
 	int errsv;
 
 	sigfillset(&intmask);
 	sigprocmask(SIG_BLOCK, &intmask, &oldmask);
 
-        setns(nsfd, CLONE_NEWNET);
-        fd = open(pathname, flags);
+	setns(nsfd, CLONE_NEWNET);
+	fd = open(pathname, flags);
 	errsv = errno;
-        setns(default_nsfd, CLONE_NEWNET);
+	setns(default_nsfd, CLONE_NEWNET);
 
 	sigprocmask(SIG_SETMASK, &oldmask, NULL);
 
 	errno = errsv;
-        return fd;
+	return fd;
 }
 
 int socket_ns(int nsfd, int domain, int type, int protocol)
 {
 	sigset_t intmask, oldmask;
-        int sk;
+	int sk;
 	int errsv;
 
 	sigfillset(&intmask);
 	sigprocmask(SIG_BLOCK, &intmask, &oldmask);
 
-        setns(nsfd, CLONE_NEWNET);
-        sk = socket(domain, type, protocol);
+	setns(nsfd, CLONE_NEWNET);
+	sk = socket(domain, type, protocol);
 	errsv = errno;
-        setns(default_nsfd, CLONE_NEWNET);
+	setns(default_nsfd, CLONE_NEWNET);
 
 	sigprocmask(SIG_SETMASK, &oldmask, NULL);
 
 	errno = errsv;
-        return sk;
+	return sk;
 }
 
 void init_netns()
@@ -128,7 +128,7 @@ int get_nsfd(const char *name)
 	unshare(CLONE_NEWNET);
 	mount("/proc/self/ns/net", path, "none", MS_BIND, NULL);
 
-        setns(default_nsfd, CLONE_NEWNET);
+	setns(default_nsfd, CLONE_NEWNET);
 
 	sigprocmask(SIG_SETMASK, &oldmask, NULL);
 

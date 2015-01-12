@@ -60,8 +60,8 @@ struct control_loop {
 static struct control_loop ctrl;
 
 struct controller {
-        struct rcu_head rcu_head;       /* For call_rcu() */
-        struct cds_list_head controllers;
+	struct rcu_head rcu_head;       /* For call_rcu() */
+	struct cds_list_head controllers;
 
 	int fd;
 	ErlConnect conp;
@@ -253,7 +253,7 @@ static ETERM *wtp2term(struct client *clnt)
 	wtp[3] = erl_mk_int(clnt->mtu);
 	wtp[4] = erl_mk_tuple(wtp_cnt, CAA_ARRAY_SIZE(wtp_cnt));
 
-        cds_hlist_for_each_entry_rcu_2(sta, &clnt->stations, wtp_list) {
+	cds_hlist_for_each_entry_rcu_2(sta, &clnt->stations, wtp_list) {
 		ETERM *esta[2];
 		ETERM *esta_cnt[] = {
 			erl_mk_longlong(uatomic_read(&sta->rcvd_pkts)),
@@ -431,31 +431,31 @@ static ETERM *erl_list_wtp(ETERM *tuple)
 {
 	ETERM *list;
 
-        struct cds_lfht_iter iter;      /* For iteration on hash table */
+	struct cds_lfht_iter iter;      /* For iteration on hash table */
 	struct client *clnt;
 
 	list = erl_mk_empty_list();
 
-        rcu_read_lock();
-        cds_lfht_for_each_entry(ht_clients, &iter, clnt, node) {
+	rcu_read_lock();
+	cds_lfht_for_each_entry(ht_clients, &iter, clnt, node) {
 		list = erl_cons(wtp2term(clnt), list);
-        }
-        rcu_read_unlock();
+	}
+	rcu_read_unlock();
 
 	return list;
 }
 
 static ETERM *erl_clear()
 {
-        struct cds_lfht_iter iter;      /* For iteration on hash table */
+	struct cds_lfht_iter iter;      /* For iteration on hash table */
 	struct client *wtp;
 
-        rcu_read_lock();
+	rcu_read_lock();
 
-        cds_lfht_for_each_entry(ht_clients, &iter, wtp, node)
+	cds_lfht_for_each_entry(ht_clients, &iter, wtp, node)
 		__delete_wtp(wtp);
 
-        rcu_read_unlock();
+	rcu_read_unlock();
 
 	return erl_mk_atom("ok");
 }
@@ -731,15 +731,15 @@ struct cq_node {
 	ETERM *term;
 
 	struct cds_lfq_node_rcu node;
-        struct rcu_head rcu_head;       /* For call_rcu() */
+	struct rcu_head rcu_head;       /* For call_rcu() */
 };
 
 static void free_qnode(struct rcu_head *head)
 {
-        struct cq_node *node = caa_container_of(head, struct cq_node, rcu_head);
+	struct cq_node *node = caa_container_of(head, struct cq_node, rcu_head);
 
 	erl_free_term(node->term);
-        free(node);
+	free(node);
 }
 
 static void control_enqueue(ETERM *term)
@@ -768,24 +768,24 @@ static void q_cb(EV_P_ ev_async *ev, int revents)
 {
 	struct control_loop *w = ev_userdata(EV_A);
 
-        for (;;) {
-                struct cds_lfq_node_rcu *qnode;
+	for (;;) {
+		struct cds_lfq_node_rcu *qnode;
 		struct cq_node *cq;
 		struct controller *cnt;
 
-                /*
-                 * Both enqueue and dequeue need to be called within RCU
-                 * read-side critical section.
-                 */
-                rcu_read_lock();
-                qnode = cds_lfq_dequeue_rcu(&w->queue);
-                rcu_read_unlock();
-                if (!qnode) {
-                        break;  /* Queue is empty. */
-                }
+		/*
+		 * Both enqueue and dequeue need to be called within RCU
+		 * read-side critical section.
+		 */
+		rcu_read_lock();
+		qnode = cds_lfq_dequeue_rcu(&w->queue);
+		rcu_read_unlock();
+		if (!qnode) {
+			break;  /* Queue is empty. */
+		}
 
-                /* Getting the container structure from the node */
-                cq = caa_container_of(qnode, struct cq_node, node);
+		/* Getting the container structure from the node */
+		cq = caa_container_of(qnode, struct cq_node, node);
 
 		/*
 		 * we don't need RCU protection here, no one else can access the list
@@ -794,8 +794,8 @@ static void q_cb(EV_P_ ev_async *ev, int revents)
 			cnt_send(cnt, cq->term);
 		}
 
-                call_rcu(&cq->rcu_head, free_qnode);
-        }
+		call_rcu(&cq->rcu_head, free_qnode);
+	}
 }
 
 void capwap_socket_error(int origin, int type, const struct sockaddr *addr)
@@ -849,18 +849,18 @@ static void control_unlock(EV_P)
 static int set_realtime_priority(void) {
 	struct sched_param schp;
 
-        /*
-         * set the process to realtime privs
-         */
-        memset(&schp, 0, sizeof(schp));
-        schp.sched_priority = sched_get_priority_max(SCHED_FIFO);
+	/*
+	 * set the process to realtime privs
+	 */
+	memset(&schp, 0, sizeof(schp));
+	schp.sched_priority = sched_get_priority_max(SCHED_FIFO);
 
-        if (sched_setscheduler(0, SCHED_FIFO, &schp) != 0) {
-                perror("sched_setscheduler");
-                return -1;
-        }
+	if (sched_setscheduler(0, SCHED_FIFO, &schp) != 0) {
+		perror("sched_setscheduler");
+		return -1;
+	}
 
-        return 0;
+	return 0;
 }
 
 int node_name_long = 0;
@@ -931,21 +931,21 @@ static void dp_erl_connect(struct sockaddr_in *addr)
 
 static void usage(void)
 {
-        printf("TPLINO CAPWAP Data Path Deamon, Version: .....\n\n"
-               "Usage: capwap-dp [OPTION...]\n\n"
-               "Options:\n\n"
-               "  -h                                this help\n"
+	printf("TPLINO CAPWAP Data Path Deamon, Version: .....\n\n"
+	       "Usage: capwap-dp [OPTION...]\n\n"
+	       "Options:\n\n"
+	       "  -h                                this help\n"
 //               "  --dist=IP                         bind Erlang cluster protocol to interface\n"
-               "  --sname=NAME                      Erlang node short name\n"
-               "  -4, --v4only                      CAPWAP IPv4 only socket\n"
-               "  -6, --v6only                      CAPWAP IPv6 only socket\n"
+	       "  --sname=NAME                      Erlang node short name\n"
+	       "  -4, --v4only                      CAPWAP IPv4 only socket\n"
+	       "  -6, --v6only                      CAPWAP IPv6 only socket\n"
 	       "  -p, --port=PORT                   bind CAPWAP to PORT (default 5247)\n"
 //               "  -i, --bind=BIND                   bind CAPWAP to IP\n"
 	       "  -n, --netns=NAMESPACE             open CAPWAP socket in namespace\n"
-               "  -f, --forward-netns=NAMESPACE     create TAP interface in namespace\n"
-               "\n");
+	       "  -f, --forward-netns=NAMESPACE     create TAP interface in namespace\n"
+	       "\n");
 
-        exit(EXIT_SUCCESS);
+	exit(EXIT_SUCCESS);
 }
 
 int v4only = 0;
@@ -959,11 +959,11 @@ int unknown_wtp_limit_bucket = 30;
 
 int main(int argc, char *argv[])
 {
-        const struct rlimit rlim = {
-                .rlim_cur = RLIM_INFINITY,
-                .rlim_max = RLIM_INFINITY
-        };
-        struct sockaddr_in addr = {
+	const struct rlimit rlim = {
+		.rlim_cur = RLIM_INFINITY,
+		.rlim_max = RLIM_INFINITY
+	};
+	struct sockaddr_in addr = {
 		.sin_family = AF_INET,
 		.sin_port = 0,
 		.sin_addr.s_addr = htonl(INADDR_ANY)
@@ -976,65 +976,65 @@ int main(int argc, char *argv[])
 
 	config_t cfg;
 
-        int c;
+	int c;
 	socklen_t slen;
 
-        /* unlimited size for cores */
-        setrlimit(RLIMIT_CORE, &rlim);
+	/* unlimited size for cores */
+	setrlimit(RLIMIT_CORE, &rlim);
 
-        while (1) {
-                int option_index = 0;
-                static struct option long_options[] = {
-                        {"sname",         1, 0, 1024},
-                        {"name",         1, 0, 1025},
-                        {"v4only",        0, 0, '4'},
-                        {"v6only",        0, 0, '6'},
-                        {"forward-netns", 1, 0, 'f'},
-                        {"netns",         1, 0, 'n'},
-                        {"port",          1, 0, 'p'},
-                        {"v4only",        0, 0, '4'},
-                        {0, 0, 0, 0}
-                };
+	while (1) {
+		int option_index = 0;
+		static struct option long_options[] = {
+			{"sname",         1, 0, 1024},
+			{"name",         1, 0, 1025},
+			{"v4only",        0, 0, '4'},
+			{"v6only",        0, 0, '6'},
+			{"forward-netns", 1, 0, 'f'},
+			{"netns",         1, 0, 'n'},
+			{"port",          1, 0, 'p'},
+			{"v4only",        0, 0, '4'},
+			{0, 0, 0, 0}
+		};
 
-                c = getopt_long(argc, argv, "c:h46i:f:n:p:",
-                                long_options, &option_index);
-                if (c == -1)
-                        break;
+		c = getopt_long(argc, argv, "c:h46i:f:n:p:",
+				long_options, &option_index);
+		if (c == -1)
+			break;
 
-                switch (c) {
-                case 'h':
-                        usage();
-                        break;
+		switch (c) {
+		case 'h':
+			usage();
+			break;
 
 		case 1024:
 			if (node_name) {
-                                fprintf(stderr, "--name and --sname can not be used together\n");
-                                exit(EXIT_FAILURE);
+				fprintf(stderr, "--name and --sname can not be used together\n");
+				exit(EXIT_FAILURE);
 			}
 			node_name = strdup(optarg);
 			break;
 
 		case 1025:
 			if (node_name) {
-                                fprintf(stderr, "--name and --sname can not be used together\n");
-                                exit(EXIT_FAILURE);
+				fprintf(stderr, "--name and --sname can not be used together\n");
+				exit(EXIT_FAILURE);
 			}
 			node_name = strdup(optarg);
 			node_name_long = 1;
 			break;
 
-                case '4':
+		case '4':
 			if (v6only) {
-                                fprintf(stderr, "v4only and v6only can not be used together\n");
-                                exit(EXIT_FAILURE);
+				fprintf(stderr, "v4only and v6only can not be used together\n");
+				exit(EXIT_FAILURE);
 			}
 			v4only = 1;
 			break;
 
-                case '6':
+		case '6':
 			if (v4only) {
-                                fprintf(stderr, "v4only and v6only can not be used together\n");
-                                exit(EXIT_FAILURE);
+				fprintf(stderr, "v4only and v6only can not be used together\n");
+				exit(EXIT_FAILURE);
 			}
 			v6only = 1;
 			break;
@@ -1043,12 +1043,12 @@ int main(int argc, char *argv[])
 			config_file = strdup(optarg);
 			break;
 /*
-                case 'i':
-                        if (inet_aton(optarg, &addr.sin_addr) == 0) {
-                                fprintf(stderr, "Invalid IP address: '%s'\n", optarg);
-                                exit(EXIT_FAILURE);
-                        }
-                        break;
+		case 'i':
+			if (inet_aton(optarg, &addr.sin_addr) == 0) {
+				fprintf(stderr, "Invalid IP address: '%s'\n", optarg);
+				exit(EXIT_FAILURE);
+			}
+			break;
 */
 
 		case 'f':
@@ -1059,18 +1059,18 @@ int main(int argc, char *argv[])
 			capwap_ns = strdup(optarg);
 			break;
 
-                case 'p':
-                        capwap_port = strtol(optarg, NULL, 0);
-                        if (errno != 0) {
-                                fprintf(stderr, "Invalid numeric argument: '%s'\n", optarg);
-                                exit(EXIT_FAILURE);
-                        }
-                        break;
+		case 'p':
+			capwap_port = strtol(optarg, NULL, 0);
+			if (errno != 0) {
+				fprintf(stderr, "Invalid numeric argument: '%s'\n", optarg);
+				exit(EXIT_FAILURE);
+			}
+			break;
 
-                default:
-                        printf("?? getopt returned character code 0%o ??\n", c);
-                }
-        }
+		default:
+			printf("?? getopt returned character code 0%o ??\n", c);
+		}
+	}
 
 	config_init(&cfg);
 
@@ -1164,5 +1164,5 @@ int main(int argc, char *argv[])
 	ev_run(ctrl.loop, 0);
 	control_unlock(ctrl.loop);
 
-        return 0;
+	return 0;
 }

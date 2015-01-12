@@ -81,8 +81,8 @@ do {                        \
  */
 #ifdef HAVE___BUILTIN_UNREACHABLE
 #define assume(expr) ((expr) ? ((void) 0) \
-                             : (assert(!"assumption failed"), \
-                                __builtin_unreachable()))
+			     : (assert(!"assumption failed"), \
+				__builtin_unreachable()))
 #elif _MSC_VER >= 1200
 #define assume(expr) __assume(expr)
 #else
@@ -134,8 +134,8 @@ do {                        \
 #   endif
 #   ifndef HAS_TRIVIAL_DESTRUCTOR
        /* It's always safe (if inefficient) to assume that a
-        * destructor is non-trivial.
-        */
+	* destructor is non-trivial.
+	*/
 #      define HAS_TRIVIAL_DESTRUCTOR(T) (false)
 #   endif
 #endif

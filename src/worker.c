@@ -936,25 +936,25 @@ static int df_bit(const unsigned char *buffer, ssize_t len)
  *      This table is the definition of how we handle ICMP.
  */
 static const unsigned char icmp_pointers[] = {
-        [ICMP_ECHOREPLY] = 0,
-        [1] = 1,
-        [2] = 1,
-        [ICMP_DEST_UNREACH] = 1,
-        [ICMP_SOURCE_QUENCH] = 1,
-        [ICMP_REDIRECT] = 1,
-        [6] = 1,
-        [7] = 1,
-        [ICMP_ECHO] = 0,
-        [9] = 1,
-        [10] = 1,
-        [ICMP_TIME_EXCEEDED] = 1,
-        [ICMP_PARAMETERPROB] = 1,
-        [ICMP_TIMESTAMP] = 0,
-        [ICMP_TIMESTAMPREPLY] = 0,
-        [ICMP_INFO_REQUEST] = 0,
-        [ICMP_INFO_REPLY] = 0,
-        [ICMP_ADDRESS] = 0,
-        [ICMP_ADDRESSREPLY] = 0
+	[ICMP_ECHOREPLY] = 0,
+	[1] = 1,
+	[2] = 1,
+	[ICMP_DEST_UNREACH] = 1,
+	[ICMP_SOURCE_QUENCH] = 1,
+	[ICMP_REDIRECT] = 1,
+	[6] = 1,
+	[7] = 1,
+	[ICMP_ECHO] = 0,
+	[9] = 1,
+	[10] = 1,
+	[ICMP_TIME_EXCEEDED] = 1,
+	[ICMP_PARAMETERPROB] = 1,
+	[ICMP_TIMESTAMP] = 0,
+	[ICMP_TIMESTAMPREPLY] = 0,
+	[ICMP_INFO_REQUEST] = 0,
+	[ICMP_INFO_REPLY] = 0,
+	[ICMP_ADDRESS] = 0,
+	[ICMP_ADDRESSREPLY] = 0
 };
 
 static uint32_t cksum_part(uint8_t *ip, int len, uint32_t sum)
@@ -995,7 +995,7 @@ static int send_icmp_pkt_to_big(struct worker *w, unsigned int mtu, const unsign
 	unsigned char b[128];
 	int r __attribute__((unused));
 
-        /* No replies to physical multicast/broadcast */
+	/* No replies to physical multicast/broadcast */
 	debug("ether_dhost: 0x%02x, %d", ether_in->ether_dhost[0], ether_in->ether_dhost[0] & 0x01);
 	if (ether_in->ether_dhost[0] & 0x01)
 		return 1;
@@ -1023,13 +1023,13 @@ static int send_icmp_pkt_to_big(struct worker *w, unsigned int mtu, const unsign
 			return 1;
 
 		/* If we send an ICMP error to an ICMP error a mess would result.. */
-                if (ip_in->protocol == IPPROTO_ICMP) {
+		if (ip_in->protocol == IPPROTO_ICMP) {
 			struct icmphdr *icmph = (struct icmphdr *)(buffer + sizeof(struct ether_header) + ip_in->ihl * 4);
 
-                        /* Assume any unknown ICMP type is an error. */
+			/* Assume any unknown ICMP type is an error. */
 			if (icmph->type > CAA_ARRAY_SIZE(icmp_pointers) || icmp_pointers[icmph->type])
 				return 1;
-                }
+		}
 
 		iov[0].iov_len = sizeof(struct ether_header) + sizeof(struct iphdr) + sizeof(struct icmphdr);
 		iov[1].iov_len = len - sizeof(struct ether_header);
@@ -1070,7 +1070,7 @@ static int send_icmp_pkt_to_big(struct worker *w, unsigned int mtu, const unsign
 			debug("writev: %m");
 		}
 		debug("send icmp writev: %d", r);
-        }
+	}
 	break;
 
 	case ETHERTYPE_IPV6:
@@ -1111,8 +1111,8 @@ static int ieee8023_to_wtp(struct worker *w, struct client *wtp, const unsigned 
 		is_frag = 1;
 	}
 
-        debug("Aligned MSS: %zd", frag_size);
-        debug("Fragments #: %d", frag_count);
+	debug("Aligned MSS: %zd", frag_size);
+	debug("Fragments #: %d", frag_count);
 	debug("is_frag:     %d", is_frag);
 	debug("df_bit:      %d", df_bit(buffer, len));
 
@@ -1120,7 +1120,7 @@ static int ieee8023_to_wtp(struct worker *w, struct client *wtp, const unsigned 
 		return send_icmp_pkt_to_big(w, max_len - sizeof(struct ether_header), buffer, len);
 
 	if (is_frag)
-                frag_id = uatomic_add_return(&wtp->fragment_id, 1);
+		frag_id = uatomic_add_return(&wtp->fragment_id, 1);
 
 	debug("frag_id: %d", frag_id);
 
@@ -1217,12 +1217,12 @@ static int ieee8023_to_sta(struct worker *w, const unsigned char *mac, const uns
 
 static int ieee8023_bcast_to_wtps(struct worker *w, const unsigned char *buffer, ssize_t len)
 {
-        struct cds_lfht_iter iter;      /* For iteration on hash table */
+	struct cds_lfht_iter iter;      /* For iteration on hash table */
 	struct client *wtp;
 
 	rcu_read_lock();
 
-        cds_lfht_for_each_entry(ht_clients, &iter, wtp, node) {
+	cds_lfht_for_each_entry(ht_clients, &iter, wtp, node) {
 		debug("WTP %p, stations: %d", wtp, uatomic_read(&wtp->sta_count));
 
 		if (uatomic_read(&wtp->sta_count) != 0)
@@ -1384,7 +1384,7 @@ static void *worker_thread(void *arg)
 	int on = 1;
 	int domain;
 
-        struct sockaddr_storage saddr;
+	struct sockaddr_storage saddr;
 	ssize_t saddr_len;
 	struct worker *w = (struct worker *)arg;
 

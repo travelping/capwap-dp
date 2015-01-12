@@ -40,16 +40,16 @@ static __thread char ctime_buf[27];
 
 void _debug(const char *filename, int line, const char *func, const char *fmt, ...)
 {
-        va_list args;
+	va_list args;
 	struct timeval tv;
 
 	gettimeofday(&tv, NULL);
 
 	_debug_head(filename, line, func, &tv);
 
-        va_start(args, fmt);
-        pos += vsnprintf(buf + pos, sizeof(buf) - pos, fmt, args);
-        va_end(args);
+	va_start(args, fmt);
+	pos += vsnprintf(buf + pos, sizeof(buf) - pos, fmt, args);
+	va_end(args);
 
 	debug_flush();
 }
@@ -58,26 +58,26 @@ void _debug_head(const char *filename, int line, const char *func, struct timeva
 {
 	save_errno = errno;
 
-        if (ctime_last != tv->tv_sec) {
-                ctime_r(&tv->tv_sec, ctime_buf);
-                ctime_last = tv->tv_sec;
-        }
+	if (ctime_last != tv->tv_sec) {
+		ctime_r(&tv->tv_sec, ctime_buf);
+		ctime_last = tv->tv_sec;
+	}
 
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "%.15s.%03ld %s:%d:%s [%lX]: ",
+	pos += snprintf(buf + pos, sizeof(buf) - pos, "%.15s.%03ld %s:%d:%s [%lX]: ",
 			&ctime_buf[4], tv->tv_usec / 1000,
 			filename, line, func, pthread_self());
 }
 
 void debug_log(const char *fmt, ...)
 {
-        va_list args;
+	va_list args;
 
 	/* make sure %m gets the right errno */
 	errno = save_errno;
 
-        va_start(args, fmt);
-        pos += vsnprintf(buf + pos, sizeof(buf) - pos, fmt, args);
-        va_end(args);
+	va_start(args, fmt);
+	pos += vsnprintf(buf + pos, sizeof(buf) - pos, fmt, args);
+	va_end(args);
 
 	assert(pos < sizeof(buf));
 }

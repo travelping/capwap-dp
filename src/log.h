@@ -12,15 +12,15 @@
 #define _log_STRINGIFY(x) _log_XSTRINGIFY(x)
 
 #define ALLOCA_CODE_FILE(f, file)                 \
-        do {                                      \
-                size_t _fl;                       \
-                const char *_file = (file);       \
-                char **_f = &(f);                 \
-                _fl = strlen(_file) + 1;          \
-                *_f = alloca(_fl + 10);           \
-                memcpy(*_f, "CODE_FILE=", 10);    \
-                memcpy(*_f + 10, _file, _fl);     \
-        } while(0)
+	do {                                      \
+		size_t _fl;                       \
+		const char *_file = (file);       \
+		char **_f = &(f);                 \
+		_fl = strlen(_file) + 1;          \
+		*_f = alloca(_fl + 10);           \
+		memcpy(*_f, "CODE_FILE=", 10);    \
+		memcpy(*_f + 10, _file, _fl);     \
+	} while(0)
 
 #define log(priority, ...)						\
 	do {								\
