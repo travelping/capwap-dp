@@ -363,7 +363,7 @@ int __delete_wtp(struct client *wtp)
 	cds_hlist_for_each_entry_safe_2(sta, n, &wtp->stations, wtp_list)
 		detach_station_from_wtp(sta);
 
-	if ((r = cds_lfht_del(ht_clients, &wtp->node)))
+	if ((r = (cds_lfht_del(ht_clients, &wtp->node) == 0)))
 		call_rcu(&wtp->rcu_head, rcu_release_wtp);
 
 	return r;

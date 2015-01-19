@@ -540,7 +540,7 @@ static ETERM *erl_detach_station(ETERM *tuple)
 	rcu_read_lock();
 
 	if ((sta = find_station(ether)) != NULL) {
-		if (cds_lfht_del(ht_stations, &sta->station_hash)) {
+		if (cds_lfht_del(ht_stations, &sta->station_hash) == 0) {
 			detach_station_from_wtp(sta);
 			res = erl_mk_atom("ok");
 		} else
