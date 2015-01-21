@@ -231,6 +231,22 @@ static ETERM *ether2bin(uint8_t *ether)
 	return erl_mk_binary((char *)ether, ETH_ALEN);
 }
 
+static ETERM *sta2term(struct station *sta)
+{
+	ETERM *esta[2];
+	ETERM *esta_cnt[] = {
+		erl_mk_longlong(uatomic_read(&sta->rcvd_pkts)),
+		erl_mk_longlong(uatomic_read(&sta->send_pkts)),
+		erl_mk_longlong(uatomic_read(&sta->rcvd_bytes)),
+		erl_mk_longlong(uatomic_read(&sta->send_bytes))
+	};
+
+	esta[0] = ether2bin(sta->ether);
+	esta[1] = erl_mk_tuple(esta_cnt, CAA_ARRAY_SIZE(esta_cnt));
+
+	return erl_mk_tuple(esta, CAA_ARRAY_SIZE(esta));
+}
+
 static ETERM *wtp2term(struct client *clnt)
 {
 	struct station *sta;
@@ -256,18 +272,7 @@ static ETERM *wtp2term(struct client *clnt)
 	wtp[4] = erl_mk_tuple(wtp_cnt, CAA_ARRAY_SIZE(wtp_cnt));
 
 	cds_hlist_for_each_entry_rcu_2(sta, &clnt->stations, wtp_list) {
-		ETERM *esta[2];
-		ETERM *esta_cnt[] = {
-			erl_mk_longlong(uatomic_read(&sta->rcvd_pkts)),
-			erl_mk_longlong(uatomic_read(&sta->send_pkts)),
-			erl_mk_longlong(uatomic_read(&sta->rcvd_bytes)),
-			erl_mk_longlong(uatomic_read(&sta->send_bytes))
-		};
-
-		esta[0] = ether2bin(sta->ether);
-		esta[1] = erl_mk_tuple(esta_cnt, CAA_ARRAY_SIZE(esta_cnt));
-
-		wtp[1] = erl_cons(erl_mk_tuple(esta, CAA_ARRAY_SIZE(esta)), wtp[1]);
+		wtp[1] = erl_cons(sta2term(sta), wtp[1]);
 	}
 
 	return erl_mk_tuple(wtp, CAA_ARRAY_SIZE(wtp));
@@ -447,6 +452,24 @@ static ETERM *erl_list_wtp(ETERM *tuple)
 	return list;
 }
 
+static ETERM *erl_list_stations(ETERM *tuple)
+{
+	ETERM *list;
+
+	struct cds_lfht_iter iter;      /* For iteration on hash table */
+	struct station *sta;
+
+	list = erl_mk_empty_list();
+
+	rcu_read_lock();
+        cds_lfht_for_each_entry(ht_stations, &iter, sta, station_hash) {
+		list = erl_cons(sta2term(sta), list);
+	}
+	rcu_read_unlock();
+
+	return list;
+}
+
 static ETERM *erl_clear()
 {
 	struct cds_lfht_iter iter;      /* For iteration on hash table */
@@ -612,6 +635,9 @@ static ETERM *handle_gen_call_capwap(struct controller *cnt, const char *fn, ETE
 	}
 	else if (strncmp(fn, "detach_station", 14) == 0) {
 		return erl_detach_station(tuple);
+	}
+	else if (strncmp(fn, "list_stations", 13) == 0) {
+		return erl_list_stations(tuple);
 	}
 	else if (strncmp(fn, "get_stats", 9) == 0) {
 		return erl_get_stats(tuple);
