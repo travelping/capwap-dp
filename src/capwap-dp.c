@@ -568,8 +568,10 @@ static ETERM *erl_detach_station(ETERM *tuple)
 		if (cds_lfht_del(ht_stations, &sta->station_hash) == 0) {
 			detach_station_from_wtp(sta);
 			res = erl_mk_atom("ok");
-		} else
+		} else {
+			log(LOG_ALERT, "station hash corrupt");
 			res = erl_mk_atom("hash_corrupt");
+		}
 	} else
 		res = erl_mk_atom("not_found");
 

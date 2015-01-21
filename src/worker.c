@@ -360,8 +360,12 @@ int __delete_wtp(struct client *wtp)
 	 * control thread is permitted to call this
 	 */
 
-	cds_hlist_for_each_entry_safe_2(sta, n, &wtp->stations, wtp_list)
-		detach_station_from_wtp(sta);
+	cds_hlist_for_each_entry_safe_2(sta, n, &wtp->stations, wtp_list) {
+		if (cds_lfht_del(ht_stations, &sta->station_hash) == 0)
+			detach_station_from_wtp(sta);
+		else
+			log(LOG_ALERT, "station hash corrupt");
+	}
 
 	if ((r = (cds_lfht_del(ht_clients, &wtp->node) == 0)))
 		call_rcu(&wtp->rcu_head, rcu_release_wtp);
