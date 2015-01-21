@@ -163,6 +163,37 @@ out:
 	return res;
 }
 
+static void free_erl_term_array(ETERM **arr, int count)
+{
+	while (count > 0) {
+		erl_free_term(*arr);
+
+		arr++;
+		count--;
+	}
+}
+
+static ETERM *erl_term_array_to_tuple(ETERM **arr, int count)
+{
+	ETERM *ret;
+
+	ret = erl_mk_tuple(arr, count);
+	free_erl_term_array(arr, count);
+
+	return ret;
+}
+
+static ETERM *erl_list_append(ETERM *hd, ETERM *tl)
+{
+	ETERM *ret;
+
+	ret = erl_cons(hd, tl);
+	erl_free_term(tl);
+	erl_free_term(hd);
+
+	return ret;
+}
+
 static ETERM *sockaddr2term(const struct sockaddr *addr)
 {
 	char ipaddr[INET6_ADDRSTRLEN];
@@ -179,7 +210,7 @@ static ETERM *sockaddr2term(const struct sockaddr *addr)
 
 		for (int i = 0; i < 4; i++)
 			ip[i] = erl_mk_int(a[i]);
-		eaddr[0] = erl_mk_tuple(ip, 4);
+		eaddr[0] = erl_term_array_to_tuple(ip, 4);
 		eaddr[1] = erl_mk_int(ntohs(in->sin_port));
 
 		break;
@@ -194,13 +225,13 @@ static ETERM *sockaddr2term(const struct sockaddr *addr)
 
 			for (int i = 0; i < 4; i++)
 				ip[i] = erl_mk_int(a[i]);
-			eaddr[0] = erl_mk_tuple(ip, 4);
+			eaddr[0] = erl_term_array_to_tuple(ip, 4);
 		} else {
 			ETERM *ip[8];
 
 			for (int i = 0; i < 8; i++)
 				ip[i] = erl_mk_int(ntohs(in6->sin6_addr.s6_addr16[i]));
-			eaddr[0] = erl_mk_tuple(ip, 8);
+			eaddr[0] = erl_term_array_to_tuple(ip, 8);
 		}
 		eaddr[1] = erl_mk_int(ntohs(in6->sin6_port));
 
@@ -208,7 +239,7 @@ static ETERM *sockaddr2term(const struct sockaddr *addr)
 	}
 	}
 
-	return erl_mk_tuple(eaddr, 2);
+	return erl_term_array_to_tuple(eaddr, 2);
 }
 
 static int bin2ether(ETERM *ea, uint8_t *ether)
@@ -242,9 +273,9 @@ static ETERM *sta2term(struct station *sta)
 	};
 
 	esta[0] = ether2bin(sta->ether);
-	esta[1] = erl_mk_tuple(esta_cnt, CAA_ARRAY_SIZE(esta_cnt));
+	esta[1] = erl_term_array_to_tuple(esta_cnt, CAA_ARRAY_SIZE(esta_cnt));
 
-	return erl_mk_tuple(esta, CAA_ARRAY_SIZE(esta));
+	return erl_term_array_to_tuple(esta, CAA_ARRAY_SIZE(esta));
 }
 
 static ETERM *wtp2term(struct client *clnt)
@@ -269,13 +300,13 @@ static ETERM *wtp2term(struct client *clnt)
 	wtp[1] = erl_mk_empty_list();
 	wtp[2] = erl_mk_int(clnt->ref.refcount);
 	wtp[3] = erl_mk_int(clnt->mtu);
-	wtp[4] = erl_mk_tuple(wtp_cnt, CAA_ARRAY_SIZE(wtp_cnt));
+	wtp[4] = erl_term_array_to_tuple(wtp_cnt, CAA_ARRAY_SIZE(wtp_cnt));
 
 	cds_hlist_for_each_entry_rcu_2(sta, &clnt->stations, wtp_list) {
-		wtp[1] = erl_cons(sta2term(sta), wtp[1]);
+		wtp[1] = erl_list_append(sta2term(sta), wtp[1]);
 	}
 
-	return erl_mk_tuple(wtp, CAA_ARRAY_SIZE(wtp));
+	return erl_term_array_to_tuple(wtp, CAA_ARRAY_SIZE(wtp));
 }
 
 static void async_reply(struct controller *cnt, ETERM *from, ETERM *resp)
@@ -287,10 +318,13 @@ static void async_reply(struct controller *cnt, ETERM *from, ETERM *resp)
 
 	/* M = {Tag, Msg} */
 	marr[0] = erl_element(2, from);  /* Tag */
-	marr[1] = resp;
-	m = erl_mk_tuple(marr, 2);
+	marr[1] = erl_copy_term(resp);
+	m = erl_term_array_to_tuple(marr, 2);
 
 	erl_send(cnt->fd, pid, m);
+
+	erl_free_term(pid);
+	erl_free_term(m);
 }
 
 static void cnt_send(struct controller *cnt, ETERM *term)
@@ -380,8 +414,10 @@ static ETERM *erl_add_wtp(ETERM *tuple)
 	fprintf(stderr, "IP: %s:%d\n", ipaddr, ntohs(SIN_PORT(&addr)));
 
 	emtu = erl_element(3, tuple);
-	if (!ERL_IS_INTEGER(emtu))
+	if (!ERL_IS_INTEGER(emtu)) {
+		erl_free_term(emtu);
 		return erl_mk_atom("badarg");
+	}
 	mtu = ERL_INT_UVALUE(emtu);
 	erl_free_term(emtu);
 
@@ -445,7 +481,7 @@ static ETERM *erl_list_wtp(ETERM *tuple)
 
 	rcu_read_lock();
 	cds_lfht_for_each_entry(ht_clients, &iter, clnt, node) {
-		list = erl_cons(wtp2term(clnt), list);
+		list = erl_list_append(wtp2term(clnt), list);
 	}
 	rcu_read_unlock();
 
@@ -463,7 +499,7 @@ static ETERM *erl_list_stations(ETERM *tuple)
 
 	rcu_read_lock();
         cds_lfht_for_each_entry(ht_stations, &iter, sta, station_hash) {
-		list = erl_cons(sta2term(sta), list);
+		list = erl_list_append(sta2term(sta), list);
 	}
 	rcu_read_unlock();
 
@@ -605,7 +641,7 @@ static ETERM *erl_get_stats()
 			erl_mk_longlong(uatomic_read(&workers[i].ratelimit_unknown_wtp))
 		};
 
-		res = erl_cons(erl_mk_tuple(w, CAA_ARRAY_SIZE(w)), res);
+		res = erl_list_append(erl_term_array_to_tuple(w, CAA_ARRAY_SIZE(w)), res);
 	}
 	return res;
 }
@@ -837,7 +873,7 @@ void capwap_socket_error(int origin, int type, const struct sockaddr *addr)
 	msg[2] = erl_mk_int(type);
 	msg[3] = sockaddr2term(addr);
 
-	control_enqueue(erl_mk_tuple(msg, 4));
+	control_enqueue(erl_term_array_to_tuple(msg, 4));
 }
 
 void capwap_in(const struct sockaddr *addr,
@@ -850,7 +886,7 @@ void capwap_in(const struct sockaddr *addr,
 	msg[1] = sockaddr2term(addr);
 	msg[2] = erl_mk_binary((char *)buf, len);
 
-	control_enqueue(erl_mk_tuple(msg, 3));
+	control_enqueue(erl_term_array_to_tuple(msg, 3));
 }
 
 void packet_in_tap(const unsigned char *buf, ssize_t len)
@@ -861,7 +897,7 @@ void packet_in_tap(const unsigned char *buf, ssize_t len)
 	msg[1] = erl_mk_atom("tap");
 	msg[2] = erl_mk_binary((char *)buf, len);
 
-	control_enqueue(erl_mk_tuple(msg, 3));
+	control_enqueue(erl_term_array_to_tuple(msg, 3));
 }
 
 static void control_lock(EV_P)
