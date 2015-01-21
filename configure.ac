@@ -58,7 +58,7 @@ AM_MAINTAINER_MODE
 AC_HEADER_ASSERT
 
 AC_MSG_PART(required libraries)
-AC_CHECK_LIB([ev], [event_init],, AC_MSG_ERROR(Required library ev missing))
+AC_CHECK_LIB([ev], [ev_run],, AC_MSG_ERROR(Required library ev missing))
 AC_CHECK_LIB([pthread], [pthread_create],, AC_MSG_ERROR(Required library pthread missing))
 PKG_CHECK_MODULES([URCU], [liburcu],, AC_MSG_ERROR(Required library urcu missing))
 PKG_CHECK_MODULES([URCUCDS], [liburcu-cds],, AC_MSG_ERROR(Required library urcu-cds missing))
