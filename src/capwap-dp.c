@@ -601,11 +601,9 @@ static ETERM *erl_detach_station(ETERM *tuple)
 	rcu_read_lock();
 
 	if ((sta = find_station(ether)) != NULL) {
-		if (cds_lfht_del(ht_stations, &sta->station_hash) == 0) {
-			detach_station_from_wtp(sta);
+		if (__delete_station(sta) == 0) {
 			res = erl_mk_atom("ok");
 		} else {
-			log(LOG_ALERT, "station hash corrupt");
 			res = erl_mk_atom("hash_corrupt");
 		}
 	} else

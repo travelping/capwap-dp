@@ -349,6 +349,19 @@ struct client *add_wtp(const struct sockaddr *addr, unsigned int mtu)
 	return wtp;
 }
 
+int __delete_station(struct station *sta)
+{
+	int r;
+
+	if ((r = cds_lfht_del(ht_stations, &sta->station_hash)) == 0) {
+		detach_station_from_wtp(sta);
+		refcount_put_station(sta);
+	} else
+		log(LOG_ALERT, "station hash corrupt");
+
+	return r;
+}
+
 int __delete_wtp(struct client *wtp)
 {
 	int r;
@@ -360,12 +373,8 @@ int __delete_wtp(struct client *wtp)
 	 * control thread is permitted to call this
 	 */
 
-	cds_hlist_for_each_entry_safe_2(sta, n, &wtp->stations, wtp_list) {
-		if (cds_lfht_del(ht_stations, &sta->station_hash) == 0)
-			detach_station_from_wtp(sta);
-		else
-			log(LOG_ALERT, "station hash corrupt");
-	}
+	cds_hlist_for_each_entry_safe_2(sta, n, &wtp->stations, wtp_list)
+		__delete_station(sta);
 
 	if ((r = (cds_lfht_del(ht_clients, &wtp->node) == 0)))
 		call_rcu(&wtp->rcu_head, rcu_release_wtp);

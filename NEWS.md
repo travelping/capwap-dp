@@ -3,6 +3,11 @@ capwap-dp
 
 CAPWAP Datapath element
 
+Version 1.0.4 - 21 Jan 2015
+---------------------------
+
+* fix another station releated memleak found by valgrind
+
 Version 1.0.3 - 21 Jan 2015
 ---------------------------
 
