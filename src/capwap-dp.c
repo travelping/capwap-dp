@@ -139,6 +139,8 @@ static int tuple2sockaddr(ETERM *ea, struct sockaddr_storage *addr)
 	ip = erl_element(1, ea);
 	port = erl_element(2, ea);
 
+	memset(addr, 0, sizeof(struct sockaddr_storage));
+
 	if (ERL_IS_INTEGER(port))
 		switch (ERL_TUPLE_SIZE(ip)) {
 		case 4:
