@@ -3,6 +3,11 @@ capwap-dp
 
 CAPWAP Datapath element
 
+Version 1.0.5 - 02 Feb 2015
+---------------------------
+
+* replace legacy erl_interface with ei
+
 Version 1.0.4 - 21 Jan 2015
 ---------------------------
 

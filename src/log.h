@@ -4,6 +4,9 @@
 #include <string.h>
 #define __FILE_NAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : strrchr(__FILE__, '\\') ? strrchr(__FILE__, '\\') + 1 : __FILE__)
 
+#define PRIsMAC "%02x:%02x:%02x:%02x:%02x:%02x"
+#define ARGsMAC(m) (m)[0], (m)[1], (m)[2], (m)[3], (m)[4], (m)[5]
+
 #ifdef USE_SYSTEMD_JOURNAL
 
 #include <systemd/sd-journal.h>
@@ -51,6 +54,30 @@ void _debug(const char *filename, int line, const char *func, const char *fmt, .
 	__attribute__ ((__format__ (__printf__, 4, 5)));
 void _debug_head(const char *filename, int line, const char *func, struct timeval *);
 
+#define hexdump(buf, len)					\
+	_hexdump(__FILE_NAME__, __LINE__, __func__, buf, len);
+
+void _hexdump(const char *filename, int line, const char *func,
+	      const unsigned char *buf, ssize_t len) __attribute__((unused));
+
+#define debug_ei(x)							\
+	do {								\
+		int type;						\
+		int size;						\
+		int index = (x)->index;					\
+		if (ei_get_type((x)->buff, &index, &type, &size) == 0)	\
+			debug("ei type: %d, size: %d", type, size);	\
+	} while (0)
+
+#define debug_sockaddr(addr)						\
+	do {								\
+		char ipaddr[INET6_ADDRSTRLEN];				\
+									\
+		inet_ntop(((struct sockaddr *)(addr))->sa_family, SIN_ADDR_PTR((struct sockaddr *)((addr))), ipaddr, sizeof(ipaddr)); \
+		debug("IP: %s:%d", ipaddr, ntohs(SIN_PORT(((struct sockaddr *)(addr))))); \
+									\
+	} while (0)
+
 #else
 
 #define debug(format, ...) do {} while (0)
@@ -58,6 +85,9 @@ void _debug_head(const char *filename, int line, const char *func, struct timeva
 #define debug_head() do {} while (0)
 #define debug_log(format, ...) do {} while (0)
 #define debug_flush() do {} while (0)
+#define debug_ei(x) do {} while (0)
+#define debug_sockaddr(addr) do {} while (0)
+#define hexdump(buf, len) do {} while (0)
 
 #endif
 

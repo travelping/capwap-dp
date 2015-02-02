@@ -36,8 +36,9 @@
 #include <systemd/sd-daemon.h>
 #endif
 
-#include "erl_interface.h"
 #include "ei.h"
+
+void* ei_malloc (long size);
 
 #include "log.h"
 #include "capwap-dp.h"
@@ -69,150 +70,153 @@ struct controller {
 	ev_io ev_read;
 	// write_lock
 
-	ETERM *bind_pid;
+	erlang_pid bind_pid;
+
+	ei_x_buff x_in;
+	ei_x_buff x_out;
 };
 
 CDS_LIST_HEAD(controllers);
 static ei_cnode ec;
 
-static int ipv4sockaddr(ETERM *ip, unsigned int port, struct sockaddr_in *addr)
+static int ei_x_new_size(ei_x_buff* x, long size)
+{
+#define BLK_MAX 127
+
+	size = (size + BLK_MAX) & ~BLK_MAX;
+
+#undef BLK_MAX
+
+	x->buff = ei_malloc(size);
+	x->buffsz = size;
+	x->index = 0;
+	return x->buff != NULL ? 0 : -1;
+
+}
+
+static int ei_decode_sockaddr_ipv4(const char *buf, int *index, struct sockaddr_in *addr)
 {
 	uint32_t a = 0;
 
 	for (int i = 0; i < 4; i++) {
-		ETERM *n = erl_element(i+1, ip);
+		unsigned long p;
+		if (ei_decode_ulong(buf, index, &p) != 0)
+			return -1;
 		a = a << 8;
-		a |= ERL_INT_UVALUE(n);
-		erl_free_term(n);
+		a |= p;
 	}
 
 	addr->sin_family = AF_INET;
-	addr->sin_port = htons(port);
 	addr->sin_addr.s_addr = htonl(a);
 
-	return 1;
+	return 0;
 }
 
-static int ipv6_v4mappedsockaddr(ETERM *ip, unsigned int port, struct sockaddr_in6 *addr)
+static int ei_decode_sockaddr_ipv6_v4mapped(const char *buf, int *index, struct sockaddr_in6 *addr)
 {
 	uint32_t a = 0;
 
 	for (int i = 0; i < 4; i++) {
-		ETERM *n = erl_element(i+1, ip);
+		unsigned long p;
+		if (ei_decode_ulong(buf, index, &p) != 0)
+			return -1;
 		a = a << 8;
-		a |= ERL_INT_UVALUE(n);
-		erl_free_term(n);
+		a |= p;
 	}
 
 	addr->sin6_family = AF_INET6;
-	addr->sin6_port = htons(port);
 	addr->sin6_addr.s6_addr32[0] = 0;
 	addr->sin6_addr.s6_addr32[1] = 0;
 	addr->sin6_addr.s6_addr32[2] = htonl(0xffff);
 	addr->sin6_addr.s6_addr32[3] = htonl(a);
 
-	return 1;
+	return 0;
 }
 
-static int ipv6sockaddr(ETERM *ip, unsigned int port, struct sockaddr_in6 *addr)
+static int ei_decode_sockaddr_ipv6(const char *buf, int *index, struct sockaddr_in6 *addr)
 {
 	addr->sin6_family = AF_INET6;
-	addr->sin6_port = htons(port);
 
 	for (int i = 0; i < 8; i++) {
-		ETERM *n = erl_element(i+1, ip);
-		addr->sin6_addr.s6_addr16[i] = htons(ERL_INT_UVALUE(n));
-		erl_free_term(n);
+		unsigned long p;
+		if (ei_decode_ulong(buf, index, &p) != 0)
+			return -1;
+		addr->sin6_addr.s6_addr16[i] = htons(p);
 	}
 
-	return 1;
+	return 0;
 }
 
-static int tuple2sockaddr(ETERM *ea, struct sockaddr_storage *addr)
+static int ei_decode_sockaddr_ip(const char *buf, int *index, struct sockaddr_storage *addr)
 {
-	ETERM *ip, *port;
-	int res = 0;
+	int r = -1;
+	int arity;
 
-	if (ERL_TUPLE_SIZE(ea) != 2)
-		goto out;
+	if (ei_decode_tuple_header(buf, index, &arity) != 0)
+		return -1;
 
-	ip = erl_element(1, ea);
-	port = erl_element(2, ea);
+	switch (arity) {
+	case 4:
+		if (!v4only)
+			r = ei_decode_sockaddr_ipv6_v4mapped(buf, index, (struct sockaddr_in6 *)addr);
+		else
+			r = ei_decode_sockaddr_ipv4(buf, index, (struct sockaddr_in *)addr);
+		break;
+
+	case 8:
+		r = ei_decode_sockaddr_ipv6(buf, index, (struct sockaddr_in6 *)addr);
+		break;
+	}
+	return r;
+}
+
+static int ei_decode_sockaddr(const char *buf, int *index, struct sockaddr_storage *addr)
+{
+	int arity;
+	unsigned long port;
 
 	memset(addr, 0, sizeof(struct sockaddr_storage));
 
-	if (ERL_IS_INTEGER(port))
-		switch (ERL_TUPLE_SIZE(ip)) {
-		case 4:
-			if (!v4only)
-				res = ipv6_v4mappedsockaddr(ip, ERL_INT_UVALUE(port), (struct sockaddr_in6 *)addr);
-			else
-				res = ipv4sockaddr(ip, ERL_INT_UVALUE(port), (struct sockaddr_in *)addr);
-			break;
+	if (ei_decode_tuple_header(buf, index, &arity) != 0
+	    || arity != 2
+	    || ei_decode_sockaddr_ip(buf, index, addr)
+	    || ei_decode_ulong(buf, index, &port))
+	    return -1;
 
-		case 8:
-			res = ipv6sockaddr(ip, ERL_INT_UVALUE(port), (struct sockaddr_in6 *)addr);
-			break;
-		}
-
-	erl_free_term(ip);
-	erl_free_term(port);
-
-out:
-	erl_free_term(ea);
-	return res;
-}
-
-static void free_erl_term_array(ETERM **arr, int count)
-{
-	while (count > 0) {
-		erl_free_term(*arr);
-
-		arr++;
-		count--;
+	switch (addr->ss_family) {
+	case AF_INET: {
+		struct sockaddr_in *in = (struct sockaddr_in *)addr;
+		in->sin_port = htons(port);
+		break;
 	}
+
+	case AF_INET6: {
+		struct sockaddr_in6 *in6 = (struct sockaddr_in6 *)addr;
+		in6->sin6_port = htons(port);
+		break;
+	}
+	}
+
+	debug_sockaddr(addr);
+
+	return 0;
 }
 
-static ETERM *erl_term_array_to_tuple(ETERM **arr, int count)
+static void ei_x_encode_sockaddr(ei_x_buff *x, const struct sockaddr *addr)
 {
-	ETERM *ret;
+	debug_sockaddr(addr);
 
-	ret = erl_mk_tuple(arr, count);
-	free_erl_term_array(arr, count);
-
-	return ret;
-}
-
-static ETERM *erl_list_append(ETERM *hd, ETERM *tl)
-{
-	ETERM *ret;
-
-	ret = erl_cons(hd, tl);
-	erl_free_term(tl);
-	erl_free_term(hd);
-
-	return ret;
-}
-
-static ETERM *sockaddr2term(const struct sockaddr *addr)
-{
-	char ipaddr[INET6_ADDRSTRLEN];
-	ETERM *eaddr[2];
-
-	inet_ntop(addr->sa_family, SIN_ADDR_PTR(addr), ipaddr, sizeof(ipaddr));
-	fprintf(stderr, "IP: %s:%d\n", ipaddr, ntohs(SIN_PORT(addr)));
+	ei_x_encode_tuple_header(x, 2);
 
 	switch (addr->sa_family) {
 	case AF_INET: {
-		ETERM *ip[4];
 		struct sockaddr_in *in = (struct sockaddr_in *)addr;
 		uint8_t *a = (uint8_t *)&in->sin_addr.s_addr;
 
+		ei_x_encode_tuple_header(x, 4);
 		for (int i = 0; i < 4; i++)
-			ip[i] = erl_mk_int(a[i]);
-		eaddr[0] = erl_term_array_to_tuple(ip, 4);
-		eaddr[1] = erl_mk_int(ntohs(in->sin_port));
-
+			ei_x_encode_ulong(x, a[i]);
+		ei_x_encode_ulong(x, ntohs(in->sin_port));
 		break;
 	}
 
@@ -221,295 +225,165 @@ static ETERM *sockaddr2term(const struct sockaddr *addr)
 
 		if (IN6_IS_ADDR_V4MAPPED(&in6->sin6_addr)) {
 			uint8_t *a = (uint8_t *)&in6->sin6_addr.s6_addr32[3];
-			ETERM *ip[4];
 
+			ei_x_encode_tuple_header(x, 4);
 			for (int i = 0; i < 4; i++)
-				ip[i] = erl_mk_int(a[i]);
-			eaddr[0] = erl_term_array_to_tuple(ip, 4);
+				ei_x_encode_ulong(x, a[i]);
 		} else {
-			ETERM *ip[8];
-
+			ei_x_encode_tuple_header(x, 8);
 			for (int i = 0; i < 8; i++)
-				ip[i] = erl_mk_int(ntohs(in6->sin6_addr.s6_addr16[i]));
-			eaddr[0] = erl_term_array_to_tuple(ip, 8);
+				ei_x_encode_ulong(x, ntohs(in6->sin6_addr.s6_addr16[i]));
 		}
-		eaddr[1] = erl_mk_int(ntohs(in6->sin6_port));
-
+		ei_x_encode_ulong(x, ntohs(in6->sin6_port));
 		break;
 	}
 	}
-
-	return erl_term_array_to_tuple(eaddr, 2);
 }
 
-static int bin2ether(ETERM *ea, uint8_t *ether)
+static int ei_decode_ether(const char *buf, int *index, uint8_t *ether)
 {
-	int res = 0;
+	long len;
 
-	if (!ERL_IS_BINARY(ea) || (ERL_BIN_SIZE(ea) != ETH_ALEN))
-		goto out;
+	if (ei_decode_binary(buf, index, ether, &len) != 0
+	    || len != ETH_ALEN)
+		return -1;
 
-	memcpy(ether, ERL_BIN_PTR(ea), ETH_ALEN);
-	res = 1;
+	debug("MAC: " PRIsMAC, ARGsMAC(ether));
 
-out:
-	erl_free_term(ea);
-	return res;
+	return 0;
 }
 
-static ETERM *ether2bin(uint8_t *ether)
+static void ei_x_encode_ether(ei_x_buff *x, uint8_t *ether)
 {
-	return erl_mk_binary((char *)ether, ETH_ALEN);
+	debug("MAC: " PRIsMAC, ARGsMAC(ether));
+
+	ei_x_encode_binary(x, (void *)ether, ETH_ALEN);
 }
 
-static ETERM *sta2term(struct station *sta)
+static void ei_x_encode_sta(ei_x_buff *x, struct station *sta)
 {
-	ETERM *esta[2];
-	ETERM *esta_cnt[] = {
-		erl_mk_longlong(uatomic_read(&sta->rcvd_pkts)),
-		erl_mk_longlong(uatomic_read(&sta->send_pkts)),
-		erl_mk_longlong(uatomic_read(&sta->rcvd_bytes)),
-		erl_mk_longlong(uatomic_read(&sta->send_bytes))
-	};
-
-	esta[0] = ether2bin(sta->ether);
-	esta[1] = erl_term_array_to_tuple(esta_cnt, CAA_ARRAY_SIZE(esta_cnt));
-
-	return erl_term_array_to_tuple(esta, CAA_ARRAY_SIZE(esta));
+	ei_x_encode_tuple_header(x, 2);
+	ei_x_encode_ether(x, sta->ether);
+	ei_x_encode_tuple_header(x, 4);
+	ei_x_encode_longlong(x, uatomic_read(&sta->rcvd_pkts));
+	ei_x_encode_longlong(x, uatomic_read(&sta->send_pkts));
+	ei_x_encode_longlong(x, uatomic_read(&sta->rcvd_bytes));
+	ei_x_encode_longlong(x, uatomic_read(&sta->send_bytes));
 }
 
-static ETERM *wtp2term(struct client *clnt)
+static void ei_x_encode_wtp(ei_x_buff *x, struct client *clnt)
 {
 	struct station *sta;
-	ETERM *wtp[5];
-	ETERM *wtp_cnt[] = {
-		erl_mk_longlong(uatomic_read(&clnt->rcvd_pkts)),
-		erl_mk_longlong(uatomic_read(&clnt->send_pkts)),
-		erl_mk_longlong(uatomic_read(&clnt->rcvd_bytes)),
-		erl_mk_longlong(uatomic_read(&clnt->send_bytes)),
 
-		erl_mk_longlong(uatomic_read(&clnt->rcvd_fragments)),
-		erl_mk_longlong(uatomic_read(&clnt->send_fragments)),
-
-		erl_mk_longlong(uatomic_read(&clnt->err_invalid_station)),
-		erl_mk_longlong(uatomic_read(&clnt->err_fragment_invalid)),
-		erl_mk_longlong(uatomic_read(&clnt->err_fragment_too_old))
-	};
-
-	wtp[0] = sockaddr2term((struct sockaddr *)&clnt->addr);
-	wtp[1] = erl_mk_empty_list();
-	wtp[2] = erl_mk_int(clnt->ref.refcount);
-	wtp[3] = erl_mk_int(clnt->mtu);
-	wtp[4] = erl_term_array_to_tuple(wtp_cnt, CAA_ARRAY_SIZE(wtp_cnt));
-
+	ei_x_encode_tuple_header(x, 5);
+	ei_x_encode_sockaddr(x, (struct sockaddr *)&clnt->addr);
 	cds_hlist_for_each_entry_rcu_2(sta, &clnt->stations, wtp_list) {
-		wtp[1] = erl_list_append(sta2term(sta), wtp[1]);
+		ei_x_encode_list_header(x, 1);
+		ei_x_encode_sta(x, sta);
 	}
+	ei_x_encode_empty_list(x);
+	ei_x_encode_longlong(x, clnt->ref.refcount);
+	ei_x_encode_longlong(x, clnt->mtu);
+	ei_x_encode_tuple_header(x, 9);
 
-	return erl_term_array_to_tuple(wtp, CAA_ARRAY_SIZE(wtp));
+	ei_x_encode_longlong(x, uatomic_read(&clnt->rcvd_pkts));
+	ei_x_encode_longlong(x, uatomic_read(&clnt->send_pkts));
+	ei_x_encode_longlong(x, uatomic_read(&clnt->rcvd_bytes));
+	ei_x_encode_longlong(x, uatomic_read(&clnt->send_bytes));
+
+	ei_x_encode_longlong(x, uatomic_read(&clnt->rcvd_fragments));
+	ei_x_encode_longlong(x, uatomic_read(&clnt->send_fragments));
+
+	ei_x_encode_longlong(x, uatomic_read(&clnt->err_invalid_station));
+	ei_x_encode_longlong(x, uatomic_read(&clnt->err_fragment_invalid));
+	ei_x_encode_longlong(x, uatomic_read(&clnt->err_fragment_too_old));
 }
 
-static void async_reply(struct controller *cnt, ETERM *from, ETERM *resp)
+static void cnt_send(struct controller *cnt, ei_x_buff *x)
 {
-	ETERM *pid, *m;
-	ETERM *marr[2];
+	int r __attribute__((unused));
 
-	pid = erl_element(1, from);
+#if defined(DEBUG)
+	{
+		int index = 0;
+		char *s = NULL;
+		int version;
 
-	/* M = {Tag, Msg} */
-	marr[0] = erl_element(2, from);  /* Tag */
-	marr[1] = erl_copy_term(resp);
-	m = erl_term_array_to_tuple(marr, 2);
+		ei_decode_version(x->buff, &index, &version);
+		ei_s_print_term(&s, x->buff, &index);
+		debug("Msg-Out: %d, %s", index, s);
+		free(s);
 
-	erl_send(cnt->fd, pid, m);
-
-	erl_free_term(pid);
-	erl_free_term(m);
-}
-
-static void cnt_send(struct controller *cnt, ETERM *term)
-{
-	if (cnt->bind_pid)
-		erl_send(cnt->fd, cnt->bind_pid, term);
-}
-
-static ETERM *erl_bind(struct controller *cnt, ETERM *tuple)
-{
-	ETERM *pid;
-
-	if (cnt->bind_pid) {
-		erl_free_term(cnt->bind_pid);
-		cnt->bind_pid = NULL;
+		hexdump((const unsigned char *)x->buff, x->index);
 	}
+#endif
 
-	pid = erl_element(2, tuple);
-	if (ERL_IS_PID(pid))
-		cnt->bind_pid = erl_copy_term(pid);
-
-	erl_free_term(pid);
-
-	return erl_mk_atom("ok");
+	r = ei_send(cnt->fd, &cnt->bind_pid, x->buff, x->index);
+	debug("send ret: %d", r);
 }
 
-static ETERM *erl_send_to(ETERM *tuple)
+static void erl_send_to(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 {
-	ETERM *msg;
-	ssize_t r;
+	ssize_t r __attribute__((unused));
 	struct client *clnt;
-	char ipaddr[INET6_ADDRSTRLEN];
 	struct sockaddr_storage addr;
+	const char *bin;
+	long bin_len;
 
-	if (ERL_TUPLE_SIZE(tuple) != 3)
-		return erl_mk_atom("badarg");
-
-	if (!tuple2sockaddr(erl_element(2, tuple), &addr))
-		return erl_mk_atom("badarg");
-
-	inet_ntop(addr.ss_family, SIN_ADDR_PTR(&addr), ipaddr, sizeof(ipaddr));
-	fprintf(stderr, "IP: %s:%d\n", ipaddr, ntohs(SIN_PORT(&addr)));
-
-	msg = erl_element(3, tuple);
-	if (!ERL_IS_BINARY(msg)) {
-		erl_free_term(msg);
-		return erl_mk_atom("badarg");
+	if (arity != 3) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
 	}
+
+	if (ei_decode_sockaddr(x_in->buff, &x_in->index, &addr) != 0) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
+
+	if (ei_decode_binary(x_in->buff, &x_in->index, NULL, &bin_len) != 0) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
+	bin = x_in->buff + x_in->index - bin_len;
 
 	rcu_read_lock();
 
 	if ((clnt = find_wtp((struct sockaddr *)&addr)) != NULL) {
 		/* FIXME: queue request to WTP */
 
-		inet_ntop(clnt->addr.ss_family, SIN_ADDR_PTR(&clnt->addr), ipaddr, sizeof(ipaddr));
-		fprintf(stderr, "Client IP: %s:%d\n", ipaddr, ntohs(SIN_PORT(&clnt->addr)));
+		debug_sockaddr(&clnt->addr);
 
 		assert(memcmp(&addr, &clnt->addr, clnt->addr.ss_family == AF_INET ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6)) == 0);
 
-		r = sendto(workers[0].capwap_fd, ERL_BIN_PTR(msg), ERL_BIN_SIZE(msg),
-			   0, (struct sockaddr *)&clnt->addr, sizeof(clnt->addr));
-		fprintf(stderr, "erl_send_to: %zd\n", r);
+		r = sendto(workers[0].capwap_fd, bin, bin_len, 0,
+			   (struct sockaddr *)&clnt->addr, sizeof(clnt->addr));
+		debug("erl_send_to: %zd", r);
 	} else
-		fprintf(stderr, "failed to find client: %p\n", clnt);
+		log(LOG_DEBUG, "failed to find client: %p", clnt);
 
 	rcu_read_unlock();
 
-	erl_free_term(msg);
-
-	return erl_mk_atom("ok");
+	ei_x_encode_atom(x_out, "ok");
 }
 
-static ETERM *erl_add_wtp(ETERM *tuple)
+static void erl_bind(struct controller *cnt, int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 {
-	char ipaddr[INET6_ADDRSTRLEN];
-	struct sockaddr_storage addr;
-	ETERM *emtu;
-	unsigned int mtu;
-
-	if (ERL_TUPLE_SIZE(tuple) != 3)
-		return erl_mk_atom("badarg");
-
-	if (!tuple2sockaddr(erl_element(2, tuple), &addr))
-		return erl_mk_atom("badarg");
-
-	inet_ntop(addr.ss_family, SIN_ADDR_PTR(&addr), ipaddr, sizeof(ipaddr));
-	fprintf(stderr, "IP: %s:%d\n", ipaddr, ntohs(SIN_PORT(&addr)));
-
-	emtu = erl_element(3, tuple);
-	if (!ERL_IS_INTEGER(emtu)) {
-		erl_free_term(emtu);
-		return erl_mk_atom("badarg");
-	}
-	mtu = ERL_INT_UVALUE(emtu);
-	erl_free_term(emtu);
-
-	if (!add_wtp((struct sockaddr *)&addr, mtu))
-		return erl_mk_atom("enomem");
-
-	return erl_mk_atom("ok");
+	if (arity != 2
+	    || ei_decode_pid(x_in->buff, &x_in->index, &cnt->bind_pid) != 0)
+		ei_x_encode_atom(x_out, "badarg");
+	else
+		ei_x_encode_atom(x_out, "ok");
 }
 
-static ETERM *erl_get_wtp(ETERM *tuple)
-{
-	ETERM *res;
-	struct client *clnt;
-	char ipaddr[INET6_ADDRSTRLEN];
-	struct sockaddr_storage addr;
-
-	if (ERL_TUPLE_SIZE(tuple) != 2)
-		return erl_mk_atom("badarg");
-
-	if (!tuple2sockaddr(erl_element(2, tuple), &addr))
-		return erl_mk_atom("badarg");
-
-	inet_ntop(addr.ss_family, SIN_ADDR_PTR(&addr), ipaddr, sizeof(ipaddr));
-	fprintf(stderr, "IP: %s:%d\n", ipaddr, ntohs(SIN_PORT(&addr)));
-
-	rcu_read_lock();
-
-	if ((clnt = find_wtp((struct sockaddr *)&addr)) != NULL) {
-		res = wtp2term(clnt);
-	} else
-		res = erl_mk_atom("not_found");
-
-	rcu_read_unlock();
-
-	return res;
-}
-
-static ETERM *erl_del_wtp(ETERM *tuple)
-{
-	int r;
-	struct sockaddr_storage addr;
-
-	if (ERL_TUPLE_SIZE(tuple) != 2)
-		return erl_mk_atom("badarg");
-
-	if (!tuple2sockaddr(erl_element(2, tuple), &addr))
-		return erl_mk_atom("badarg");
-
-	r = delete_wtp((struct sockaddr *)&addr);
-	return (r ? erl_mk_atom("ok") : erl_mk_atom("failed"));
-}
-
-static ETERM *erl_list_wtp(ETERM *tuple)
-{
-	ETERM *list;
-
-	struct cds_lfht_iter iter;      /* For iteration on hash table */
-	struct client *clnt;
-
-	list = erl_mk_empty_list();
-
-	rcu_read_lock();
-	cds_lfht_for_each_entry(ht_clients, &iter, clnt, node) {
-		list = erl_list_append(wtp2term(clnt), list);
-	}
-	rcu_read_unlock();
-
-	return list;
-}
-
-static ETERM *erl_list_stations(ETERM *tuple)
-{
-	ETERM *list;
-
-	struct cds_lfht_iter iter;      /* For iteration on hash table */
-	struct station *sta;
-
-	list = erl_mk_empty_list();
-
-	rcu_read_lock();
-        cds_lfht_for_each_entry(ht_stations, &iter, sta, station_hash) {
-		list = erl_list_append(sta2term(sta), list);
-	}
-	rcu_read_unlock();
-
-	return list;
-}
-
-static ETERM *erl_clear()
+static void erl_clear(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 {
 	struct cds_lfht_iter iter;      /* For iteration on hash table */
 	struct client *wtp;
+
+	if (arity != 1) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
 
 	rcu_read_lock();
 
@@ -518,49 +392,134 @@ static ETERM *erl_clear()
 
 	rcu_read_unlock();
 
-	return erl_mk_atom("ok");
+	ei_x_encode_atom(x_out, "ok");
 }
 
-static ETERM *erl_attach_station(ETERM *tuple)
+static void erl_add_wtp(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
+{
+	struct sockaddr_storage addr;
+	unsigned long mtu;
+
+	if (arity != 3) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
+
+	if (ei_decode_sockaddr(x_in->buff, &x_in->index, &addr) != 0
+	    || ei_decode_ulong(x_in->buff, &x_in->index, &mtu) != 0) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
+
+	if (!add_wtp((struct sockaddr *)&addr, mtu))
+		ei_x_encode_atom(x_out, "enomem");
+	else
+		ei_x_encode_atom(x_out, "ok");
+}
+
+static void erl_del_wtp(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
+{
+	struct sockaddr_storage addr;
+
+	if (arity != 2) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
+
+	if (ei_decode_sockaddr(x_in->buff, &x_in->index, &addr) != 0) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
+
+	if (!delete_wtp((struct sockaddr *)&addr))
+		ei_x_encode_atom(x_out, "failed");
+	else
+		ei_x_encode_atom(x_out, "ok");
+}
+
+static void erl_list_wtp(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
+{
+	struct cds_lfht_iter iter;      /* For iteration on hash table */
+	struct client *clnt;
+
+	if (arity != 1) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
+
+	rcu_read_lock();
+	cds_lfht_for_each_entry(ht_clients, &iter, clnt, node) {
+		ei_x_encode_list_header(x_out, 1);
+		ei_x_encode_wtp(x_out, clnt);
+	}
+	rcu_read_unlock();
+	ei_x_encode_empty_list(x_out);
+}
+
+static void erl_get_wtp(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
+{
+	struct client *clnt;
+	struct sockaddr_storage addr;
+
+	if (arity != 2) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
+
+	if (ei_decode_sockaddr(x_in->buff, &x_in->index, &addr) != 0) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
+
+	rcu_read_lock();
+
+	if ((clnt = find_wtp((struct sockaddr *)&addr)) != NULL) {
+		ei_x_encode_wtp(x_out, clnt);
+	} else
+		ei_x_encode_atom(x_out, "not_found");
+
+	rcu_read_unlock();
+}
+
+static void erl_attach_station(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 {
 	struct station *sta;
 	struct client *clnt;
-	char ipaddr[INET6_ADDRSTRLEN];
 	struct sockaddr_storage addr;
 	uint8_t ether[ETH_ALEN];
-	ETERM *res;
 
 	unsigned long hash;
 
-	if (ERL_TUPLE_SIZE(tuple) != 3)
-		return erl_mk_atom("badarg");
+	if (arity != 3) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
 
-	if (!tuple2sockaddr(erl_element(2, tuple), &addr)
-	    || !bin2ether(erl_element(3, tuple), ether))
-		return erl_mk_atom("badarg");
-
-	inet_ntop(addr.ss_family, SIN_ADDR_PTR(&addr), ipaddr, sizeof(ipaddr));
-	fprintf(stderr, "IP: %s:%d\n", ipaddr, ntohs(SIN_PORT(&addr)));
-	fprintf(stderr, "MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-		ether[0], ether[1], ether[2], ether[3], ether[4], ether[5]);
+	if (ei_decode_sockaddr(x_in->buff, &x_in->index, &addr) != 0
+	    || ei_decode_ether(x_in->buff, &x_in->index, ether) != 0) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
 
 	rcu_read_lock();
 
 	if (find_station(ether) != NULL) {
-		res = erl_mk_atom("duplicate");
+		ei_x_encode_atom(x_out, "duplicate");
 		goto out_unlock;
 	}
 
 	if ((clnt = find_wtp((struct sockaddr *)&addr)) == NULL) {
-		res = erl_mk_atom("not_found");
+		ei_x_encode_atom(x_out, "not_found");
 		goto out_unlock;
 	}
 
 	hash = jhash(ether, ETH_ALEN, 0x12345678);
 
 	sta = calloc(1, sizeof(struct station));
-	if (!sta)
-		return erl_mk_atom("enomem");
+	if (!sta) {
+		ei_x_encode_atom(x_out, "enomem");
+		goto out_unlock;
+	}
 
 	urcu_ref_init(&sta->ref);
 	cds_lfht_node_init(&sta->station_hash);
@@ -575,215 +534,285 @@ static ETERM *erl_attach_station(ETERM *tuple)
 	cds_lfht_add(ht_stations, hash, &sta->station_hash);
 	attach_station_to_wtp(clnt, sta);
 
-	res = erl_mk_atom("ok");
+	ei_x_encode_atom(x_out, "ok");
 
 out_unlock:
 	rcu_read_unlock();
-
-	return res;
 }
 
-static ETERM *erl_detach_station(ETERM *tuple)
+static void erl_detach_station(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 {
 	struct station *sta;
 	uint8_t ether[ETH_ALEN];
-	ETERM *res;
 
-	if (ERL_TUPLE_SIZE(tuple) != 2)
-		return erl_mk_atom("badarg");
+	if (arity != 2) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
 
-	if (!bin2ether(erl_element(2, tuple), ether))
-		return erl_mk_atom("badarg");
-
-	fprintf(stderr, "MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-		ether[0], ether[1], ether[2], ether[3], ether[4], ether[5]);
+	if (ei_decode_ether(x_in->buff, &x_in->index, ether) != 0) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
 
 	rcu_read_lock();
 
 	if ((sta = find_station(ether)) != NULL) {
 		if (__delete_station(sta) == 0) {
-			res = erl_mk_atom("ok");
+			ei_x_encode_atom(x_out, "ok");
 		} else {
-			res = erl_mk_atom("hash_corrupt");
+			ei_x_encode_atom(x_out, "hash_corrupt");
 		}
 	} else
-		res = erl_mk_atom("not_found");
+		ei_x_encode_atom(x_out, "not_found");
 
 	rcu_read_unlock();
-
-	return res;
 }
 
-static ETERM *erl_get_stats()
+static void erl_list_stations(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 {
-	ETERM *res;
+	struct cds_lfht_iter iter;      /* For iteration on hash table */
+	struct station *sta;
 
-	res = erl_mk_empty_list();
-	for (int i = 0; i < num_workers; i++) {
-		ETERM *w[] = {
-			erl_mk_longlong(uatomic_read(&workers[i].rcvd_pkts)),
-			erl_mk_longlong(uatomic_read(&workers[i].send_pkts)),
-			erl_mk_longlong(uatomic_read(&workers[i].rcvd_bytes)),
-			erl_mk_longlong(uatomic_read(&workers[i].send_bytes)),
-
-			erl_mk_longlong(uatomic_read(&workers[i].rcvd_fragments)),
-			erl_mk_longlong(uatomic_read(&workers[i].send_fragments)),
-
-			erl_mk_longlong(uatomic_read(&workers[i].err_invalid_station)),
-			erl_mk_longlong(uatomic_read(&workers[i].err_fragment_invalid)),
-			erl_mk_longlong(uatomic_read(&workers[i].err_fragment_too_old)),
-
-			erl_mk_longlong(uatomic_read(&workers[i].err_invalid_wtp)),
-			erl_mk_longlong(uatomic_read(&workers[i].err_hdr_length_invalid)),
-			erl_mk_longlong(uatomic_read(&workers[i].err_too_short)),
-			erl_mk_longlong(uatomic_read(&workers[i].ratelimit_unknown_wtp))
-		};
-
-		res = erl_list_append(erl_term_array_to_tuple(w, CAA_ARRAY_SIZE(w)), res);
+	if (arity != 1) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
 	}
-	return res;
+
+	rcu_read_lock();
+        cds_lfht_for_each_entry(ht_stations, &iter, sta, station_hash) {
+		ei_x_encode_list_header(x_out, 1);
+		ei_x_encode_sta(x_out, sta);
+
+	}
+	rcu_read_unlock();
+	ei_x_encode_empty_list(x_out);
 }
-static ETERM *handle_gen_call_capwap(struct controller *cnt, const char *fn, ETERM *tuple)
+
+static void erl_get_stats(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
+{
+	ei_x_encode_list_header(x_out, num_workers);
+	for (int i = 0; i < num_workers; i++) {
+		ei_x_encode_tuple_header(x_out, 13);
+
+		ei_x_encode_longlong(x_out, uatomic_read(&workers[i].rcvd_pkts));
+		ei_x_encode_longlong(x_out, uatomic_read(&workers[i].send_pkts));
+		ei_x_encode_longlong(x_out, uatomic_read(&workers[i].rcvd_bytes));
+		ei_x_encode_longlong(x_out, uatomic_read(&workers[i].send_bytes));
+
+		ei_x_encode_longlong(x_out, uatomic_read(&workers[i].rcvd_fragments));
+		ei_x_encode_longlong(x_out, uatomic_read(&workers[i].send_fragments));
+
+		ei_x_encode_longlong(x_out, uatomic_read(&workers[i].err_invalid_station));
+		ei_x_encode_longlong(x_out, uatomic_read(&workers[i].err_fragment_invalid));
+		ei_x_encode_longlong(x_out, uatomic_read(&workers[i].err_fragment_too_old));
+
+		ei_x_encode_longlong(x_out, uatomic_read(&workers[i].err_invalid_wtp));
+		ei_x_encode_longlong(x_out, uatomic_read(&workers[i].err_hdr_length_invalid));
+		ei_x_encode_longlong(x_out, uatomic_read(&workers[i].err_too_short));
+		ei_x_encode_longlong(x_out, uatomic_read(&workers[i].ratelimit_unknown_wtp));
+	}
+	ei_x_encode_empty_list(x_out);
+}
+
+static void handle_gen_call_capwap(struct controller *cnt, const char *fn, int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 {
 	if (strncmp(fn, "sendto", 6) == 0) {
-		return erl_send_to(tuple);
+		erl_send_to(arity, x_in, x_out);
 	}
 	if (strncmp(fn, "bind", 4) == 0) {
-		return erl_bind(cnt, tuple);
+		erl_bind(cnt, arity, x_in, x_out);
 	}
 	if (strncmp(fn, "clear", 4) == 0) {
-		return erl_clear();
+		erl_clear(arity, x_in, x_out);
 	}
 	if (strncmp(fn, "add_wtp", 7) == 0) {
-		return erl_add_wtp(tuple);
+		erl_add_wtp(arity, x_in, x_out);
 	}
 	else if (strncmp(fn, "del_wtp", 7) == 0) {
-		return erl_del_wtp(tuple);
+		erl_del_wtp(arity, x_in, x_out);
 	}
 	else if (strncmp(fn, "list_wtp", 8) == 0) {
-		return erl_list_wtp(tuple);
+		erl_list_wtp(arity, x_in, x_out);
 	}
 	else if (strncmp(fn, "get_wtp", 7) == 0) {
-		return erl_get_wtp(tuple);
+		erl_get_wtp(arity, x_in, x_out);
 	}
 	else if (strncmp(fn, "attach_station", 14) == 0) {
-		return erl_attach_station(tuple);
+		erl_attach_station(arity, x_in, x_out);
 	}
 	else if (strncmp(fn, "detach_station", 14) == 0) {
-		return erl_detach_station(tuple);
+		erl_detach_station(arity, x_in, x_out);
 	}
 	else if (strncmp(fn, "list_stations", 13) == 0) {
-		return erl_list_stations(tuple);
+		erl_list_stations(arity, x_in, x_out);
 	}
 	else if (strncmp(fn, "get_stats", 9) == 0) {
-		return erl_get_stats(tuple);
+		erl_get_stats(arity, x_in, x_out);
 	}
 	else
-		return erl_mk_atom("error");
+		ei_x_encode_atom(x_out, "error");
 }
 
-static void handle_gen_call(struct controller *cnt, const char *to, ETERM *from, ETERM *tuple)
+static void handle_gen_call(struct controller *cnt, const char *to, ei_x_buff *x_in)
 {
-	ETERM *fn;
-	ETERM *resp;
+	ei_x_buff *x_out = &cnt->x_out;
+	int arity;
+	erlang_pid pid;
+	erlang_ref ref;
+	char fn[MAXATOMLEN+1] = {0};
+	int r __attribute__((unused));
 
-	fn = erl_element(1, tuple);
+	/* decode From tupple */
+	if (ei_decode_tuple_header(x_in->buff, &x_in->index, &arity) < 0
+	    || arity != 2
+	    || ei_decode_pid(x_in->buff, &x_in->index, &pid) < 0
+	    || ei_decode_ref(x_in->buff, &x_in->index, &ref) < 0) {
+		debug("Ignoring malformed message.");
+		log(LOG_WARNING, "Ignoring malformed message.");
+		return;
+	}
+
+	/* decode call args */
+	if (ei_decode_tuple_header(x_in->buff, &x_in->index, &arity) < 0
+	    || ei_decode_atom(x_in->buff, &x_in->index, fn) < 0) {
+		debug("Ignoring malformed message.");
+		log(LOG_WARNING, "Ignoring malformed message.");
+		return;
+	}
+
+	ei_x_encode_version(x_out);
+	ei_x_encode_tuple_header(x_out, 2);
+	ei_x_encode_ref(x_out, &ref);
 
 	if (strncmp(to, "net_kernel", 10) == 0 &&
-	    strncmp(ERL_ATOM_PTR(fn), "is_auth", 7) == 0) {
-		resp = erl_mk_atom("yes");
+	    strncmp(fn, "is_auth", 7) == 0) {
+		ei_x_encode_atom(x_out, "yes");
 	}
 	else if (strncmp(to, "capwap", 6) == 0) {
-		resp = handle_gen_call_capwap(cnt, ERL_ATOM_PTR(fn), tuple);
+		handle_gen_call_capwap(cnt, fn, arity, x_in, x_out);
 	}
 	else
-		resp = erl_mk_atom("error");
+		ei_x_encode_atom(x_out, "error");
 
-	async_reply(cnt, from, resp);
+#if defined(DEBUG)
+	{
+		int index = 0;
+		char *s = NULL;
+		int version;
 
-	erl_free_term(fn);
-	erl_free_term(resp);
+		ei_decode_version(x_out->buff, &index, &version);
+		ei_s_print_term(&s, x_out->buff, &index);
+		debug("Msg-Out: %d, %s", index, s);
+		free(s);
+	}
+#endif
+
+	r = ei_send(cnt->fd, &pid, x_out->buff, x_out->index);
+	debug("send ret: %d", r);
 }
 
-static void handle_gen_cast(struct controller *cnt, ETERM *cast)
+static void handle_gen_cast(struct controller *cnt, const char *to, ei_x_buff *x_in)
 {
+}
+
+static void handle_msg(struct controller *cnt, const char *to, ei_x_buff *x_in)
+{
+	int version;
+	int arity;
+	char type[MAXATOMLEN+1] = {0};
+
+	debug("Msg to: %s, ", to);
+
+	x_in->index = 0;
+
+	if (ei_decode_version(x_in->buff, &x_in->index, &version) < 0) {
+		debug("Ignoring malformed message (bad version: %d).", version);
+		log(LOG_WARNING, "Ignoring malformed message (bad version: %d).", version);
+		return;
+	}
+
+#if defined(DEBUG)
+	{
+		int index = x_in->index;
+		char *s = NULL;
+
+		ei_s_print_term(&s, x_in->buff, &index);
+		debug("Msg-In: %d, %s", index, s);
+		free(s);
+	}
+#endif
+
+	if (ei_decode_tuple_header(x_in->buff, &x_in->index, &arity) < 0
+	    || ei_decode_atom(x_in->buff, &x_in->index, type) < 0) {
+		debug("Ignoring malformed message.");
+		log(LOG_WARNING, "Ignoring malformed message.");
+		return;
+	}
+
+	debug("Type: %s\n", type);
+
+	if (arity == 3 && strncmp(type, "$gen_call", 9) == 0) {
+		handle_gen_call(cnt, to, x_in);
+	}
+	else if (arity == 2 && strncmp(type, "$gen_cast", 9) == 0) {
+		handle_gen_cast(cnt, to, x_in);
+	}
+	else
+		log(LOG_WARNING, "Ignoring Msg %s.", type);
 }
 
 static void erl_read_cb(EV_P_ ev_io *w, int revents)
 {
-	ei_x_buff x;
+	struct controller *cnt = caa_container_of(w, struct controller, ev_read);
 	erlang_msg msg;
 	int r;
 
-	ei_x_new(&x);
-	r = ei_xreceive_msg(w->fd, &msg, &x);
+	ei_x_buff *x_in = &cnt->x_in;
+	ei_x_buff *x_out = &cnt->x_out;
+
+	x_out->index = x_in->index = 0;
+
+	r = ei_xreceive_msg(w->fd, &msg, x_in);
 	if (r == ERL_TICK) {
+		debug("DEBUG: TICK");
 		/* ignore */
 	} else if (r == ERL_ERROR) {
-		fprintf(stderr, "ERROR on fd %d, %s (%d)\n", w->fd, strerror(erl_errno), erl_errno);
+		log(LOG_ERR, "ERROR on fd %d, %s (%d)", w->fd, strerror(erl_errno), erl_errno);
 		close(w->fd);
 		ev_io_stop (EV_A_ w);
 	} else {
-		struct controller *cnt = caa_container_of(w, struct controller, ev_read);
-		int index = 0;
-
 		switch (msg.msgtype) {
-		case ERL_REG_SEND: {
-			ETERM *fmsg, *type;
-
-			ei_decode_term(x.buff, &index, &fmsg);
-			type = erl_element(1, fmsg);
-
-			fprintf(stderr, "Msg to: %s, ", msg.toname);
-			erl_print_term(stderr, fmsg);
-			fprintf(stderr, "\n");
-
-			if (strncmp(ERL_ATOM_PTR(type), "$gen_call", 9) == 0) {
-				ETERM *from, *call;
-
-				from = erl_element(2, fmsg);
-				call = erl_element(3, fmsg);
-				handle_gen_call(cnt, msg.toname, from, call);
-				erl_free_term(from);
-				erl_free_term(call);
-			}
-			else if (strncmp(ERL_ATOM_PTR(type), "$gen_cast", 9) == 0) {
-				ETERM *cast;
-
-				cast = erl_element(2, fmsg);
-				handle_gen_cast(cnt, cast);
-				erl_free_term(cast);
-			}
-
-			erl_free_term(type);
-			erl_free_term(fmsg);
-
+		case ERL_SEND:
+		case ERL_REG_SEND:
+			handle_msg(cnt, msg.toname, x_in);
 			break;
-		}
+
 		default:
-			fprintf(stderr, "msg.msgtype: %ld\n", msg.msgtype);
+			debug("msg.msgtype: %ld", msg.msgtype);
 			break;
 		}
 	}
-
-	ei_x_free(&x);
 }
 
 static void control_cb(EV_P_ ev_io *w, int revents)
 {
 	struct controller *cnt;
 
-	if (!(cnt = malloc(sizeof(struct controller))))
+	if (!(cnt = calloc(1, sizeof(struct controller))))
 		return;
-	memset(cnt, 0, sizeof(struct controller));
 
 	if ((cnt->fd = ei_accept_tmo(&ec, w->fd, &cnt->conp, 100)) == ERL_ERROR) {
-		fprintf(stderr, "Failed to ei_accept on fd %d with %s (%d)\n", w->fd, strerror(erl_errno), erl_errno);
+		log(LOG_WARNING, "Failed to ei_accept on fd %d with %s (%d)", w->fd, strerror(erl_errno), erl_errno);
 		free(cnt);
 		return;
 	}
 
-	fprintf(stderr, "ei_accept, got fd %d (%d)\n", cnt->fd, erl_errno);
+	debug("ei_accept, got fd %d (%d)", cnt->fd, erl_errno);
+
+	/* prealloc enough space to hold a full CAPWAP PDU plus Erlang encoded meta data */
+	ei_x_new_size(&cnt->x_in, 2048);
+	ei_x_new_size(&cnt->x_out, 2048);
 
 	ev_io_init(&cnt->ev_read, erl_read_cb, cnt->fd, EV_READ);
 	ev_io_start(EV_A_ &cnt->ev_read);
@@ -792,7 +821,7 @@ static void control_cb(EV_P_ ev_io *w, int revents)
 }
 
 struct cq_node {
-	ETERM *term;
+	ei_x_buff x;
 
 	struct cds_lfq_node_rcu node;
 	struct rcu_head rcu_head;       /* For call_rcu() */
@@ -802,11 +831,11 @@ static void free_qnode(struct rcu_head *head)
 {
 	struct cq_node *node = caa_container_of(head, struct cq_node, rcu_head);
 
-	erl_free_term(node->term);
+	ei_x_free(&node->x);
 	free(node);
 }
 
-static void control_enqueue(ETERM *term)
+static void control_enqueue(ei_x_buff *x)
 {
 	struct cq_node *cq;
 
@@ -815,7 +844,7 @@ static void control_enqueue(ETERM *term)
 		return;
 
 	cds_lfq_node_init_rcu(&cq->node);
-	cq->term = term;
+	memcpy(&cq->x, x, sizeof(ei_x_buff));
 
 	/*
 	 * Both enqueue and dequeue need to be called within RCU
@@ -855,7 +884,7 @@ static void q_cb(EV_P_ ev_async *ev, int revents)
 		 * we don't need RCU protection here, no one else can access the list
 		 */
 		cds_list_for_each_entry_rcu(cnt, &controllers, controllers) {
-			cnt_send(cnt, cq->term);
+			cnt_send(cnt, &cq->x);
 		}
 
 		call_rcu(&cq->rcu_head, free_qnode);
@@ -864,38 +893,50 @@ static void q_cb(EV_P_ ev_async *ev, int revents)
 
 void capwap_socket_error(int origin, int type, const struct sockaddr *addr)
 {
-	ETERM *msg[4];
+	ei_x_buff x;
 
-	msg[0] = erl_mk_atom("capwap_error");
-	msg[1] = erl_mk_int(origin);
-	msg[2] = erl_mk_int(type);
-	msg[3] = sockaddr2term(addr);
+	ei_x_new(&x);
+	ei_x_encode_version(&x);
+	ei_x_encode_tuple_header(&x, 4);
+	ei_x_encode_atom(&x, "capwap_error");
+	ei_x_encode_ulong(&x, origin);
+	ei_x_encode_ulong(&x, type);
+	ei_x_encode_sockaddr(&x, addr);
 
-	control_enqueue(erl_term_array_to_tuple(msg, 4));
+	control_enqueue(&x);
 }
 
 void capwap_in(const struct sockaddr *addr,
 	       const unsigned char *radio_mac, unsigned int radio_mac_len,
 	       const unsigned char *buf, ssize_t len)
 {
-	ETERM *msg[3];
+	ei_x_buff x;
 
-	msg[0] = erl_mk_atom("capwap_in");
-	msg[1] = sockaddr2term(addr);
-	msg[2] = erl_mk_binary((char *)buf, len);
+	/* prealloc enough space to hold the data plus the Erlang encoded meta data */
+	ei_x_new_size(&x, 48 + len);
+	ei_x_encode_version(&x);
+	ei_x_encode_tuple_header(&x, 3);
+	ei_x_encode_atom(&x, "capwap_in");
+	ei_x_encode_sockaddr(&x, addr);
+	hexdump(buf, len);
+	ei_x_encode_binary(&x, (void *)buf, len);
 
-	control_enqueue(erl_term_array_to_tuple(msg, 3));
+	control_enqueue(&x);
 }
 
 void packet_in_tap(const unsigned char *buf, ssize_t len)
 {
-	ETERM *msg[3];
+	ei_x_buff x;
 
-	msg[0] = erl_mk_atom("packet_in");
-	msg[1] = erl_mk_atom("tap");
-	msg[2] = erl_mk_binary((char *)buf, len);
+	/* prealloc enough space to hold the data plus the Erlang encoded meta data */
+	ei_x_new_size(&x, 48 + len);
+	ei_x_encode_version(&x);
+	ei_x_encode_tuple_header(&x, 3);
+	ei_x_encode_atom(&x, "packet_in");
+	ei_x_encode_atom(&x, "tap");
+	ei_x_encode_binary(&x, (void *)buf, len);
 
-	control_enqueue(erl_term_array_to_tuple(msg, 3));
+	control_enqueue(&x);
 }
 
 static void control_lock(EV_P)
@@ -960,7 +1001,7 @@ static void dp_erl_connect(struct sockaddr_in *addr)
 			}
 		}
 
-		fprintf(stderr, "thishostname: %s, hp->h_name: '%s'\n", thishostname, hp->h_name);
+		log(LOG_DEBUG, "thishostname: %s, hp->h_name: '%s'", thishostname, hp->h_name);
 		if (!node_name_long) {
 			char* ct;
 			if (strncmp(hp->h_name, "localhost", 9) == 0) {
@@ -977,18 +1018,18 @@ static void dp_erl_connect(struct sockaddr_in *addr)
 			snprintf(thisnodename, sizeof(thisnodename), "%s@%s", thisalivename, hp->h_name);
 	}
 
-	fprintf(stderr, "thishostname:'%s'\n", thishostname);
-	fprintf(stderr, "thisalivename:'%s'\n", thisalivename);
-	fprintf(stderr, "thisnodename:'%s'\n", thisnodename);
+	log(LOG_DEBUG, "thishostname:'%s'", thishostname);
+	log(LOG_DEBUG, "thisalivename:'%s'", thisalivename);
+	log(LOG_DEBUG, "thisnodename:'%s'", thisnodename);
 
 	if (ei_connect_xinit(&ec, thishostname, thisalivename, thisnodename,
 			     &addr->sin_addr, cookie, 0) < 0) {
-		fprintf(stderr,"ERROR when initializing: %d",erl_errno);
+		log(LOG_ERR, "ERROR when initializing: %d", erl_errno);
 		exit(EXIT_FAILURE);
 	}
 
 	if (ei_publish(&ec, ntohs(addr->sin_port)) < 0) {
-		fprintf(stderr,"unable to register with EPMD: %d", erl_errno);
+		log(LOG_ERR, "unable to register with EPMD: %d", erl_errno);
 		exit(EXIT_FAILURE);
 	}
 }
@@ -1138,25 +1179,30 @@ int main(int argc, char *argv[])
 
 	config_init(&cfg);
 
-	/* Read the file. If there is an error, report it and exit. */
-	if (!config_read_file(&cfg, config_file)) {
-		fprintf(stderr, "%s:%d - %s\n", config_error_file(&cfg),
-			config_error_line(&cfg), config_error_text(&cfg));
-		config_destroy(&cfg);
-		return(EXIT_FAILURE);
+	if (access(config_file, R_OK) == 0) {
+		/* Read the file. If there is an error, report it and exit. */
+		if (!config_read_file(&cfg, config_file)) {
+			fprintf(stderr, "%s:%d - %s\n", config_error_file(&cfg),
+				config_error_line(&cfg), config_error_text(&cfg));
+			config_destroy(&cfg);
+			return(EXIT_FAILURE);
+		}
+
+		config_lookup_string(&cfg, "node.name", (const char **)&node_name);
+		config_lookup_string(&cfg, "node.cookie", (const char **)&cookie);
+
+		config_lookup_int(&cfg, "capwap.listen.port", &capwap_port);
+		config_lookup_string(&cfg, "capwap.listen.namespace", &capwap_ns);
+		config_lookup_string(&cfg, "capwap.forward.namespace", &fwd_ns);
+
+		config_lookup_int(&cfg, "capwap.ratelimit.unknown-wtp.interval", &unknown_wtp_limit_interval);
+		config_lookup_int(&cfg, "capwap.ratelimit.unknown-wtp.bucket", &unknown_wtp_limit_bucket);
+
+		config_lookup_int(&cfg, "capwap.workers", &cfg_num_workers);
+	} else {
+		fprintf(stderr, "can't open config file %s, running with default config\n", config_file);
+		log(LOG_WARNING, "can't open config file %s, running with default config", config_file);
 	}
-
-	config_lookup_string(&cfg, "node.name", (const char **)&node_name);
-	config_lookup_string(&cfg, "node.cookie", (const char **)&cookie);
-
-	config_lookup_int(&cfg, "capwap.listen.port", &capwap_port);
-	config_lookup_string(&cfg, "capwap.listen.namespace", &capwap_ns);
-	config_lookup_string(&cfg, "capwap.forward.namespace", &fwd_ns);
-
-	config_lookup_int(&cfg, "capwap.ratelimit.unknown-wtp.interval", &unknown_wtp_limit_interval);
-	config_lookup_int(&cfg, "capwap.ratelimit.unknown-wtp.bucket", &unknown_wtp_limit_bucket);
-
-	config_lookup_int(&cfg, "capwap.workers", &cfg_num_workers);
 
 	if (!node_name)
 		node_name = strdup("capwap-dp");
@@ -1164,8 +1210,10 @@ int main(int argc, char *argv[])
 	if (mlockall(MCL_CURRENT|MCL_FUTURE))
 		perror("mlockall() failed");
 
-	if (set_realtime_priority() < 0)
+	if (set_realtime_priority() < 0) {
 		fprintf(stderr, "can't get realtime priority, run capwap-dp as root.\n");
+		log(LOG_WARNING, "can't get realtime priority, run capwap-dp as root.");
+	}
 
 	/*
 	 * Each thread need using RCU read-side need to be explicitly
@@ -1186,7 +1234,6 @@ int main(int argc, char *argv[])
 	ev_async_start(ctrl.loop, &ctrl.q_ev);
 
 	init_netns();
-	erl_init(NULL, 0);
 
 	if ((ctrl.listen_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)) < 0)
 		exit(EXIT_FAILURE);

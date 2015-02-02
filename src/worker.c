@@ -49,9 +49,6 @@
 #include "netns.h"
 #include "dhcp_internal.h"
 
-#define PRIsMAC "%02x:%02x:%02x:%02x:%02x:%02x"
-#define ARGsMAC(m) (m)[0], (m)[1], (m)[2], (m)[3], (m)[4], (m)[5]
-
 int num_workers;
 struct worker *workers;
 
@@ -188,35 +185,6 @@ void detach_station_from_wtp(struct station *sta)
 	call_rcu(&sta->rcu_release, rcu_release_wtp_from_sta);
 }
 
-#if defined(DEBUG)
-
-#warning "debug is on"
-
-static void hexdump(const unsigned char *buf, ssize_t len)
-{
-	struct timeval tv;
-	ssize_t i;
-
-	gettimeofday(&tv, NULL);
-
-	for (i = 0; i < len; i++) {
-		if (i % 16 == 0) {
-			if (i != 0)
-				debug_log("\n");
-			debug_head(&tv);
-			debug_log("0x%08zx:  ", i);
-		}
-		debug_log("%02x ", buf[i]);
-	}
-	debug_flush();
-}
-
-#else
-
-#define hexdump(buf, len) do {} while (0)
-
-#endif
-
 #define SOCK_ADDR_CMP(a, b, socktype, field)				\
 	memcmp(&(((struct socktype *)(a))->field),			\
 	       &(((struct socktype *)(b))->field),			\
@@ -283,7 +251,7 @@ static struct cds_lfht_node *get_wtp_node(const struct sockaddr *addr)
 
 #if defined(DEBUG)
 	inet_ntop(addr->sa_family, SIN_ADDR_PTR(addr), ipaddr, sizeof(ipaddr));
-	debug("get_wtp_node IP: %s:%d, hash: 0x%08lx\n", ipaddr, ntohs(SIN_PORT(addr)), hash);
+	debug("IP: %s:%d, hash: 0x%08lx\n", ipaddr, ntohs(SIN_PORT(addr)), hash);
 #endif
 
 	cds_lfht_lookup(ht_clients, hash, match_sockaddr, addr, &iter);
@@ -317,7 +285,7 @@ struct client *add_wtp(const struct sockaddr *addr, unsigned int mtu)
 
 #if defined(DEBUG)
 	inet_ntop(addr->sa_family, SIN_ADDR_PTR(addr), ipaddr, sizeof(ipaddr));
-	debug("add_wtp IP: %s:%d, hash: 0x%08lx\n", ipaddr, ntohs(SIN_PORT(addr)), hash);
+	debug("IP: %s:%d, hash: 0x%08lx\n", ipaddr, ntohs(SIN_PORT(addr)), hash);
 #endif
 
 	if (!(wtp = calloc(1, sizeof(struct client))))

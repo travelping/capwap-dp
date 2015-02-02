@@ -116,9 +116,9 @@ AC_SUBST([ERTSBASE])
 CPPFLAGS="$CPPFLAGS -I${EIBASE}/include -I${ERTSBASE}/include"
 LDFLAGS="$LDFLAGS -L${EIBASE}/lib -L${ERTSBASE}/lib"
 
-AC_CHECK_HEADER([erl_interface.h], [], [AC_MSG_ERROR([can't find erl_interface.h; under debian you need to install erlang-src])], [])
+AC_CHECK_HEADER([ei.h], [], [AC_MSG_ERROR([can't find erl_interface.h; under debian you need to install erlang-src])], [])
 AC_CHECK_LIB([ei], [ei_set_compat_rel], [], [AC_MSG_ERROR([can't find libei])], [])
-AC_CHECK_LIB([erl_interface], [erl_compare_ext], [], [AC_MSG_ERROR([can't find liberl_interface])], [])
+dnl AC_CHECK_LIB([erl_interface], [erl_compare_ext], [], [AC_MSG_ERROR([can't find liberl_interface])], [])
 
 AC_CONFIG_FILES([
         Makefile

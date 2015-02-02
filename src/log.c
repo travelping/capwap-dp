@@ -93,4 +93,24 @@ void debug_flush()
 	errno = save_errno;
 }
 
+void _hexdump(const char *filename, int line, const char *func,
+	      const unsigned char *data, ssize_t len)
+{
+	struct timeval tv;
+	ssize_t i;
+
+	gettimeofday(&tv, NULL);
+
+	for (i = 0; i < len; i++) {
+		if (i % 16 == 0) {
+			if (i != 0)
+				debug_log("\n");
+			_debug_head(filename, line, func, &tv);
+			debug_log("0x%08zx:  ", i);
+		}
+		debug_log("%02x ", data[i]);
+	}
+	debug_flush();
+}
+
 #endif
