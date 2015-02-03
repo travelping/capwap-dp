@@ -355,6 +355,17 @@ static void erl_send_to(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 
 		assert(memcmp(&addr, &clnt->addr, clnt->addr.ss_family == AF_INET ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6)) == 0);
 
+		uatomic_inc(&workers[0].send_pkts);
+		uatomic_inc(&clnt->send_pkts);
+		uatomic_add(&workers[0].send_bytes, bin_len);
+		uatomic_add(&clnt->send_bytes, bin_len);
+
+		if (bin_len > CAPWAP_HEADER_LEN &&
+		    GET_CAPWAP_HEADER_FIELD(bin, CAPWAP_F_FRAG, 0)) {
+			uatomic_inc(&workers[0].send_fragments);
+			uatomic_inc(&clnt->send_fragments);
+		}
+
 		r = sendto(workers[0].capwap_fd, bin, bin_len, 0,
 			   (struct sockaddr *)&clnt->addr, sizeof(clnt->addr));
 		debug("erl_send_to: %zd", r);
