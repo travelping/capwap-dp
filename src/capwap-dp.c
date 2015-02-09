@@ -580,6 +580,31 @@ static void erl_detach_station(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 	rcu_read_unlock();
 }
 
+static void erl_get_station(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
+{
+	struct station *sta;
+	uint8_t ether[ETH_ALEN];
+
+	if (arity != 2) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
+
+	if (ei_decode_ether(x_in->buff, &x_in->index, ether) != 0) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
+
+	rcu_read_lock();
+
+	if ((sta = find_station(ether)) != NULL) {
+		ei_x_encode_sta(x_out, sta);
+	} else
+		ei_x_encode_atom(x_out, "not_found");
+
+	rcu_read_unlock();
+}
+
 static void erl_list_stations(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 {
 	struct cds_lfht_iter iter;      /* For iteration on hash table */
@@ -654,6 +679,9 @@ static void handle_gen_call_capwap(struct controller *cnt, const char *fn, int a
 	}
 	else if (strncmp(fn, "detach_station", 14) == 0) {
 		erl_detach_station(arity, x_in, x_out);
+	}
+	else if (strncmp(fn, "get_station", 11) == 0) {
+		erl_get_station(arity, x_in, x_out);
 	}
 	else if (strncmp(fn, "list_stations", 13) == 0) {
 		erl_list_stations(arity, x_in, x_out);

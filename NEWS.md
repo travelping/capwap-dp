@@ -6,6 +6,7 @@ CAPWAP Datapath element
 Version 1.0.6 - xx Feb 2015
 ---------------------------
 
+* add function to retrieve station values
 * account traffic to a WTP initiated by the control channel
 
 Version 1.0.5 - 02 Feb 2015
