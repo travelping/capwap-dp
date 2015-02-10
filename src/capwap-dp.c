@@ -801,6 +801,15 @@ static void handle_msg(struct controller *cnt, const char *to, ei_x_buff *x_in)
 		log(LOG_WARNING, "Ignoring Msg %s.", type);
 }
 
+static void free_controller(struct rcu_head *head)
+{
+	struct controller *cnt = caa_container_of(head, struct controller, rcu_head);
+
+	ei_x_free(&cnt->x_in);
+	ei_x_free(&cnt->x_out);
+	free(cnt);
+}
+
 static void erl_read_cb(EV_P_ ev_io *w, int revents)
 {
 	struct controller *cnt = caa_container_of(w, struct controller, ev_read);
@@ -818,8 +827,12 @@ static void erl_read_cb(EV_P_ ev_io *w, int revents)
 		/* ignore */
 	} else if (r == ERL_ERROR) {
 		log(LOG_ERR, "ERROR on fd %d, %s (%d)", w->fd, strerror(erl_errno), erl_errno);
+		cnt->fd = -1;
 		close(w->fd);
 		ev_io_stop (EV_A_ w);
+
+		cds_list_del_rcu(&cnt->controllers);
+		call_rcu(&cnt->rcu_head, free_controller);
 	} else {
 		switch (msg.msgtype) {
 		case ERL_SEND:
