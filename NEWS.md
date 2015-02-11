@@ -3,7 +3,7 @@ capwap-dp
 
 CAPWAP Datapath element
 
-Version 1.0.6 - xx Feb 2015
+Version 1.0.6 - 11 Feb 2015
 ---------------------------
 
 * release controller struct when closing the controller socket
