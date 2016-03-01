@@ -764,31 +764,113 @@ out_unlock:
 	rcu_read_unlock();
 }
 
+static void wtp_update_mtu(struct sockaddr *addr, int mtu)
+{
+	struct client *wtp;
+
+	rcu_read_lock();
+
+	wtp = find_wtp(addr);
+	debug("Update MTU for WTP %p to %d", wtp, mtu);
+	if (wtp && uatomic_read(&wtp->mtu) > mtu)
+		uatomic_set(&wtp->mtu, mtu);
+
+	rcu_read_unlock();
+}
+
+static void handle_icmp_error(struct sock_extended_err *sock_err,
+			      struct sockaddr *remote)
+{
+	struct sockaddr *addr = SO_EE_OFFENDER(sock_err);
+	char ipaddr[INET6_ADDRSTRLEN] __attribute__((unused));
+
+#if defined(DEBUG)
+	inet_ntop(addr->sa_family, SIN_ADDR_PTR(addr), ipaddr, sizeof(ipaddr));
+	debug("ICMP Offender IP: %s:%d", ipaddr, ntohs(SIN_PORT(addr)));
+
+	inet_ntop(remote->sa_family, SIN_ADDR_PTR(remote), ipaddr, sizeof(ipaddr));
+	debug("ICMP Origin IP: %s:%d", ipaddr, ntohs(SIN_PORT(remote)));
+#endif
+
+	/* Handle ICMP errors types */
+	switch (sock_err->ee_type) {
+	case ICMP_DEST_UNREACH:
+		switch (sock_err->ee_code) {
+		case ICMP_NET_UNREACH:
+			/* Network Unreachable          */
+			debug("Network Unreachable Error");
+			break;
+
+		case ICMP_HOST_UNREACH:
+			/* Host Unreachable             */
+			debug("Host Unreachable Error");
+			break;
+
+		case ICMP_PORT_UNREACH:
+			/* Port Unreachable             */
+			debug("Port Unreachable Error");
+			break;
+
+		case ICMP_FRAG_NEEDED:
+			/* Fragmentation Needed/DF set  */
+			wtp_update_mtu(remote, sock_err->ee_info);
+			break;
+
+		default:
+			/* Handle all other cases. Find more errors :
+			 * http://lxr.linux.no/linux+v3.5/include/linux/icmp.h#L39
+			 */
+			debug("got Destination Unreachable, Code %d", sock_err->ee_code);
+			break;
+		}
+		break;
+
+	default:
+		/* Handle all other cases. Find more errors :
+		 * http://lxr.linux.no/linux+v3.5/include/linux/icmp.h#L39
+		 */
+		debug("got ICMP Error %d", sock_err->ee_type);
+		break;
+	}
+}
+
 static void capwap_read_error_q(struct worker *w, int fd)
 {
 	ssize_t r;
-	char buffer[2048];
+	char ctrl[1024];
 	struct iovec iov;                       /* Data array */
 	struct msghdr msg;                      /* Message header */
 	struct cmsghdr *cmsg;                   /* Control related data */
 	struct sock_extended_err *sock_err;     /* Struct describing the error */
-	struct icmphdr icmph;                   /* ICMP header */
-	struct sockaddr_in remote;              /* Our socket */
+	char data[2048];                        /* ICMP Data */
+	struct sockaddr_storage remote;         /* Our socket */
+	char ipaddr[INET6_ADDRSTRLEN] __attribute__((unused));
 
 	for (;;) {
-		iov.iov_base = &icmph;
-		iov.iov_len = sizeof(icmph);
-		msg.msg_name = (void*)&remote;
-		msg.msg_namelen = sizeof(remote);
+		memset(data, 0, sizeof(data));
+		memset(&remote, 0, sizeof(remote));
+		memset(&msg, 0, sizeof(msg));
+		iov.iov_base = data;
+		iov.iov_len = sizeof(data);
 		msg.msg_iov = &iov;
 		msg.msg_iovlen = 1;
+		msg.msg_name = (void*)&remote;
+		msg.msg_namelen = sizeof(remote);
 		msg.msg_flags = 0;
-		msg.msg_control = buffer;
-		msg.msg_controllen = sizeof(buffer);
+		msg.msg_control = ctrl;
+		msg.msg_controllen = sizeof(ctrl);
 
 		/* Receiving errors flog is set */
 		if ((r = recvmsg(fd, &msg, MSG_ERRQUEUE)) < 0)
 			break;
+
+#if defined(DEBUG)
+		debug("Msg Flags: %08x", msg.msg_flags);
+		inet_ntop(remote.ss_family, SIN_ADDR_PTR(&remote), ipaddr, sizeof(ipaddr));
+		debug("Remote IP: %s:%d", ipaddr, ntohs(SIN_PORT(&remote)));
+
+		hexdump(msg.msg_name, msg.msg_namelen);
+#endif
 
 		/* Control messages are always accessed via some macros
 		 * http://www.kernel.org/doc/man-pages/online/pages/man3/cmsg.3.html
@@ -807,42 +889,35 @@ static void capwap_read_error_q(struct worker *w, int fd)
 								  msg.msg_name);
 */
 				if (sock_err)
-					debug("IP_RECVERR: origin: %d, type: %d", sock_err->ee_origin, sock_err->ee_type);
+					debug("IP_RECVERR: origin: %d, type: %d",
+					      sock_err->ee_origin, sock_err->ee_type);
 
-				if (sock_err && sock_err->ee_origin == SO_EE_ORIGIN_ICMP) {
-					/* Handle ICMP errors types */
-					switch (sock_err->ee_type) {
-					case ICMP_NET_UNREACH:
-						/* Handle this error */
-						debug("Network Unreachable Error");
-						break;
-
-					case ICMP_HOST_UNREACH:
-						/* Handle this error */
-						debug("Host Unreachable Error");
-						break;
-
-					case ICMP_PORT_UNREACH:
-						/* Handle this error */
-						debug("Port Unreachable Error");
-						break;
-
-					default:
-						/* Handle all other cases. Find more errors :
-						 * http://lxr.linux.no/linux+v3.5/include/linux/icmp.h#L39
-						 */
-						debug("got Error %d", sock_err->ee_type);
-						break;
-					}
-				}
+				if (sock_err && sock_err->ee_origin == SO_EE_ORIGIN_ICMP)
+					handle_icmp_error(sock_err, (struct sockaddr *)&remote);
 			}
 			else if (cmsg->cmsg_level == SOL_IPV6 &&
 				 cmsg->cmsg_type == IPV6_RECVERR) {
 				debug("We got IPV6_RECVERR message (msg_name: %p)", msg.msg_name);
 				sock_err = (struct sock_extended_err*)CMSG_DATA(cmsg);
 
-				if (sock_err)
-					debug("IPV6_RECVERR: origin: %d, type: %d", sock_err->ee_origin, sock_err->ee_type);
+				if (sock_err) {
+					debug("IPV6_RECVERR: origin: %d, type: %d",
+					      sock_err->ee_origin, sock_err->ee_type);
+					switch (sock_err->ee_origin) {
+					case SO_EE_ORIGIN_LOCAL:
+						debug("LOCAL info: %d", sock_err->ee_info);
+						break;
+
+					case SO_EE_ORIGIN_ICMP:
+						handle_icmp_error(sock_err, (struct sockaddr *)&remote);
+						break;
+
+					case SO_EE_ORIGIN_ICMP6:
+						/* TODO */
+						break;
+
+					}
+				}
 			}
 		}
 	}
@@ -1075,6 +1150,7 @@ static int ieee8023_to_wtp(struct worker *w, struct client *wtp, const unsigned 
 	ssize_t hlen;
 	unsigned char chdr[32];
 
+	unsigned int mtu;
 	int is_frag = 0;
 	unsigned int frag_id = 0;
 	unsigned int frag_count = 1;
@@ -1083,11 +1159,12 @@ static int ieee8023_to_wtp(struct worker *w, struct client *wtp, const unsigned 
 
 	/* TODO: calculate hlen based on binding and optional header */
 	hlen = 2;
+	mtu = uatomic_read(&wtp->mtu);
 
-	max_len = wtp->mtu - sizeof(struct iphdr) - sizeof(struct udphdr) - hlen * 4;
+	max_len = mtu - sizeof(struct iphdr) - sizeof(struct udphdr) - hlen * 4;
 
 	if (len > max_len) {
-		frag_size = ((wtp->mtu - sizeof(struct iphdr) - sizeof(struct udphdr) - hlen * 4) / 8) * 8;
+		frag_size = ((mtu - sizeof(struct iphdr) - sizeof(struct udphdr) - hlen * 4) / 8) * 8;
 		frag_count = (len + frag_size - 1) / frag_size;
 		is_frag = 1;
 	}
