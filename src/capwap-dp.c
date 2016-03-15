@@ -1100,6 +1100,7 @@ static void usage(void)
 //               "  -i, --bind=BIND                   bind CAPWAP to IP\n"
 	       "  -n, --netns=NAMESPACE             open CAPWAP socket in namespace\n"
 	       "  -f, --forward-netns=NAMESPACE     create TAP interface in namespace\n"
+	       "  --honor-df                        send ICMP notice based on IP DF bit\n"
 	       "\n");
 
 	exit(EXIT_SUCCESS);
@@ -1110,6 +1111,7 @@ int v6only = 0;
 int capwap_port = 5247;
 const char *capwap_ns = NULL;
 const char *fwd_ns = NULL;
+int honor_df = 0;
 
 int unknown_wtp_limit_interval = 1000;
 int unknown_wtp_limit_bucket = 30;
@@ -1143,7 +1145,8 @@ int main(int argc, char *argv[])
 		int option_index = 0;
 		static struct option long_options[] = {
 			{"sname",         1, 0, 1024},
-			{"name",         1, 0, 1025},
+			{"name",          1, 0, 1025},
+			{"honor-df",      1, 0, 1026},
 			{"v4only",        0, 0, '4'},
 			{"v6only",        0, 0, '6'},
 			{"forward-netns", 1, 0, 'f'},
@@ -1178,6 +1181,10 @@ int main(int argc, char *argv[])
 			}
 			node_name = strdup(optarg);
 			node_name_long = 1;
+			break;
+
+		case 1026:
+			honor_df = 1;
 			break;
 
 		case '4':
@@ -1246,6 +1253,7 @@ int main(int argc, char *argv[])
 		config_lookup_int(&cfg, "capwap.listen.port", &capwap_port);
 		config_lookup_string(&cfg, "capwap.listen.namespace", &capwap_ns);
 		config_lookup_string(&cfg, "capwap.forward.namespace", &fwd_ns);
+		config_lookup_bool(&cfg, "capwap.forward.honor-df-bit", &honor_df);
 
 		config_lookup_int(&cfg, "capwap.ratelimit.unknown-wtp.interval", &unknown_wtp_limit_interval);
 		config_lookup_int(&cfg, "capwap.ratelimit.unknown-wtp.bucket", &unknown_wtp_limit_bucket);

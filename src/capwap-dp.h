@@ -12,6 +12,7 @@ extern int v6only;
 extern int capwap_port;
 extern const char *capwap_ns;
 extern const char *fwd_ns;
+extern int honor_df;
 
 extern int unknown_wtp_limit_interval;
 extern int unknown_wtp_limit_bucket;

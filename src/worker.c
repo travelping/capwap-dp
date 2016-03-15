@@ -1174,10 +1174,10 @@ static int ieee8023_to_wtp(struct worker *w, struct client *wtp, const unsigned 
 	debug("is_frag:     %d", is_frag);
 	debug("df_bit:      %d", df_bit(buffer, len));
 
-	if (is_frag && df_bit(buffer, len))
+	if (honor_df && is_frag && df_bit(buffer, len))
 		return send_icmp_pkt_to_big(w, max_len - sizeof(struct ether_header), buffer, len);
 
-	if (is_frag)
+	if (is_frag && !frag_id)
 		frag_id = uatomic_add_return(&wtp->fragment_id, 1);
 
 	debug("frag_id: %d", frag_id);
