@@ -149,7 +149,6 @@ void attach_station_to_wtp(struct client *, struct station *);
 void detach_station_from_wtp(struct station *);
 
 struct client *add_wtp(const struct sockaddr *, unsigned int mtu);
-int delete_wtp(const struct sockaddr *);
 
 int __delete_station(struct station *sta);
 int __delete_wtp(struct client *wtp);

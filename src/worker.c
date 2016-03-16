@@ -350,21 +350,6 @@ int __delete_wtp(struct client *wtp)
 	return r;
 }
 
-int delete_wtp(const struct sockaddr *addr)
-{
-	int r = 0;
-	struct client *wtp;
-
-	rcu_read_lock();
-
-	if ((wtp = find_wtp(addr)) != NULL)
-		r = __delete_wtp(wtp);
-
-	rcu_read_unlock();
-
-	return r;
-}
-
 static void stop_cb(EV_P_ ev_async *ev, int revents)
 {
 	struct worker *w = ev_userdata(EV_A);

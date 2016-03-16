@@ -431,6 +431,7 @@ static void erl_add_wtp(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 static void erl_del_wtp(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 {
 	struct sockaddr_storage addr;
+	struct client *wtp;
 
 	if (arity != 2) {
 		ei_x_encode_atom(x_out, "badarg");
@@ -442,10 +443,21 @@ static void erl_del_wtp(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 		return;
 	}
 
-	if (!delete_wtp((struct sockaddr *)&addr))
-		ei_x_encode_atom(x_out, "failed");
-	else
-		ei_x_encode_atom(x_out, "ok");
+	rcu_read_lock();
+
+	if ((wtp = find_wtp((struct sockaddr *)&addr)) != NULL) {
+		if (!__delete_wtp(wtp))
+			ei_x_encode_atom(x_out, "failed");
+		else {
+			ei_x_encode_tuple_header(x_out, 2);
+			ei_x_encode_atom(x_out, "ok");
+			ei_x_encode_wtp(x_out, wtp);
+		}
+	} else
+		ei_x_encode_atom(x_out, "not_found");
+
+	rcu_read_unlock();
+
 }
 
 static void erl_list_wtp(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
@@ -570,7 +582,9 @@ static void erl_detach_station(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 
 	if ((sta = find_station(ether)) != NULL) {
 		if (__delete_station(sta) == 0) {
+			ei_x_encode_tuple_header(x_out, 2);
 			ei_x_encode_atom(x_out, "ok");
+			ei_x_encode_sta(x_out, sta);
 		} else {
 			ei_x_encode_atom(x_out, "hash_corrupt");
 		}
