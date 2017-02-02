@@ -79,6 +79,8 @@ struct station {
 
 	struct client *wtp;
 	uint8_t ether[ETH_ALEN];
+	unsigned int rid;
+	uint8_t bssid[ETH_ALEN];
 
 	unsigned long rcvd_pkts;
 	unsigned long send_pkts;

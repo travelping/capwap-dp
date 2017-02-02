@@ -280,8 +280,10 @@ static void ei_x_encode_ether(ei_x_buff *x, uint8_t *ether)
 
 static void ei_x_encode_sta(ei_x_buff *x, struct station *sta)
 {
-	ei_x_encode_tuple_header(x, 2);
+	ei_x_encode_tuple_header(x, 4);
 	ei_x_encode_ether(x, sta->ether);
+	ei_x_encode_ulong(x, sta->rid);
+	ei_x_encode_ether(x, sta->bssid);
 	ei_x_encode_tuple_header(x, 4);
 	ei_x_encode_longlong(x, uatomic_read(&sta->rcvd_pkts));
 	ei_x_encode_longlong(x, uatomic_read(&sta->send_pkts));
@@ -528,16 +530,20 @@ static void erl_attach_station(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 	struct client *clnt;
 	struct sockaddr_storage addr;
 	uint8_t ether[ETH_ALEN];
+	unsigned long rid;
+	uint8_t bssid[ETH_ALEN];
 
 	unsigned long hash;
 
-	if (arity != 3) {
+	if (arity != 5) {
 		ei_x_encode_atom(x_out, "badarg");
 		return;
 	}
 
 	if (ei_decode_sockaddr(x_in->buff, &x_in->index, &addr) != 0
-	    || ei_decode_ether(x_in->buff, &x_in->index, ether) != 0) {
+	    || ei_decode_ether(x_in->buff, &x_in->index, ether) != 0
+	    || ei_decode_ulong(x_in->buff, &x_in->index, &rid) != 0
+	    || ei_decode_ether(x_in->buff, &x_in->index, bssid) != 0) {
 		ei_x_encode_atom(x_out, "badarg");
 		return;
 	}
@@ -565,6 +571,8 @@ static void erl_attach_station(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 	urcu_ref_init(&sta->ref);
 	cds_lfht_node_init(&sta->station_hash);
 	memcpy(&sta->ether, &ether, sizeof(ether));
+	sta->rid = rid;
+	memcpy(&sta->bssid, &bssid, sizeof(bssid));
 
 	/*
 	 * Mutating operations need mutal exclusion from each other,

@@ -395,7 +395,7 @@ unsigned long hash_sockaddr(const struct sockaddr *addr)
 }
 
 static void forward_capwap(struct worker *w, struct client *wtp, const struct sockaddr *addr,
-			   const unsigned char *radio_mac, unsigned int radio_mac_len,
+			   unsigned int rid, const unsigned char *radio_mac, unsigned int radio_mac_len,
 			   struct ether_header *ether, unsigned char *data, unsigned int len)
 {
 	struct station *sta;
@@ -406,10 +406,24 @@ static void forward_capwap(struct worker *w, struct client *wtp, const struct so
 
 	debug("fwd CW ether: " PRIsMAC, ARGsMAC(ether->ether_shost));
 	if ((sta = find_station(ether->ether_shost)) != NULL) {
-		/* queue packet to TAP */
 
 		debug("found STA %p, STA-WTP %p, WTP %p", sta, sta->wtp, wtp);
 
+		if (radio_mac_len == sizeof(sta->bssid) &&
+		    memcmp(radio_mac, sta->bssid, radio_mac_len) != 0) {
+			debug("got CAPWAP DP fro Station on unexpected RADIO MAC "
+			      "(got: "PRIsMAC", expected: "PRIsMAC"), ignoring",
+			    ARGsMAC(radio_mac), ARGsMAC(sta->bssid));
+			goto out_unlock;
+		}
+
+		if (sta->rid != rid) {
+			debug("got CAPWAP DP from Station on unexpected RADIO "
+			      "(got: %d, expected: %d, ignoring", rid, sta->rid);
+			goto out_unlock;
+		}
+
+		/* queue packet to TAP */
 		uatomic_inc(&sta->rcvd_pkts);
 		uatomic_add(&sta->rcvd_bytes, len + ETH_ALEN * 2);
 
@@ -427,7 +441,8 @@ static void forward_capwap(struct worker *w, struct client *wtp, const struct so
 		}
 		debug("fwd CW writev: %d", r);
 	}
-	else if (radio_mac_len == sizeof(ether->ether_shost) && memcmp(radio_mac, ether->ether_shost, radio_mac_len) == 0) {
+	else if (radio_mac_len == sizeof(ether->ether_shost) &&
+		 memcmp(radio_mac, ether->ether_shost, radio_mac_len) == 0) {
 		debug("got CAPWAP DP from RADIO MAC ("PRIsMAC"), ignoring", ARGsMAC(ether->ether_shost));
 	} else {
 		uatomic_inc(&w->err_invalid_station);
@@ -435,6 +450,7 @@ static void forward_capwap(struct worker *w, struct client *wtp, const struct so
 		debug("got CAPWAP DP from unknown station " PRIsMAC, ARGsMAC(ether->ether_shost));
 	}
 
+out_unlock:
 	rcu_read_unlock();
 }
 
@@ -449,16 +465,20 @@ static void handle_capwap_keep_alive(struct worker *w, struct client *wtp, struc
 		uatomic_inc(&w->ratelimit_unknown_wtp);
 }
 
-static void handle_capwap_packet(struct worker *w, struct client *wtp, struct msghdr *msg, unsigned char *buffer, unsigned int len)
+static void handle_capwap_packet(struct worker *w, struct client *wtp, struct msghdr *msg,
+				 unsigned char *buffer, unsigned int len)
 {
 	const struct sockaddr *addr = (struct sockaddr *)msg->msg_name;
 	unsigned int hlen    = GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_HLEN_MASK, CAPWAP_HLEN_SHIFT) * 4;
 	unsigned char *data  = buffer + hlen;
 	unsigned int datalen = len - hlen;
 
+	unsigned int rid;
 	unsigned int wbid;
 	unsigned int radio_mac_len = 0;
 	unsigned char *radio_mac = NULL;
+
+	rid = GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_RID_MASK, CAPWAP_RID_SHIFT);
 
 	if (GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_F_TYPE, 0))
 		wbid = GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_WBID_MASK, CAPWAP_WBID_SHIFT);
@@ -472,7 +492,8 @@ static void handle_capwap_packet(struct worker *w, struct client *wtp, struct ms
 
 	switch (wbid) {
 	case CAPWAP_802_3_PAYLOAD:
-		forward_capwap(w, wtp, addr, radio_mac, radio_mac_len, (struct ether_header *)data, data + ETH_ALEN * 2, datalen - ETH_ALEN * 2);
+		forward_capwap(w, wtp, addr, rid, radio_mac, radio_mac_len,
+			       (struct ether_header *)data, data + ETH_ALEN * 2, datalen - ETH_ALEN * 2);
 		break;
 
 	case CAPWAP_802_11_PAYLOAD: {
@@ -497,7 +518,8 @@ static void handle_capwap_packet(struct worker *w, struct client *wtp, struct ms
 			ether = (struct ether_header *)&hdr->addr1;
 			memcpy(&ether->ether_shost, &hdr->addr3, ETH_ALEN);
 
-			forward_capwap(w, wtp, addr, radio_mac, radio_mac_len, ether, data + sizeof(struct ieee80211_hdr), datalen - sizeof(struct ieee80211_hdr));
+			forward_capwap(w, wtp, addr, rid, radio_mac, radio_mac_len, ether,
+				       data + sizeof(struct ieee80211_hdr), datalen - sizeof(struct ieee80211_hdr));
 		} else {
 			/* wrong direction / unknown / unhandled WLAN frame - ignore */
 			debug("ignoring: type %d, To/From %d", WLAN_FC_GET_TYPE(fc), (fc & (WLAN_FC_TODS | WLAN_FC_FROMDS)));
@@ -1144,7 +1166,8 @@ static int send_icmp_pkt_to_big(struct worker *w, unsigned int mtu, const unsign
 	return 1;
 }
 
-static int ieee8023_to_wtp(struct worker *w, struct client *wtp, const unsigned char *buffer, ssize_t len)
+static int ieee8023_to_wtp(struct worker *w, struct client *wtp, unsigned int rid,
+			   const unsigned char *buffer, ssize_t len)
 {
 	ssize_t r __attribute__((unused));
 	struct iovec iov[2];
@@ -1189,7 +1212,7 @@ static int ieee8023_to_wtp(struct worker *w, struct client *wtp, const unsigned 
 
 	/* Version = 0, Type = 0, HLen = 8, RId = 1, WBID 802.11, 802.3 encoding */
 	((uint32_t *)chdr)[0] = htobe32((hlen << CAPWAP_HLEN_SHIFT) |
-					(1 << CAPWAP_RID_SHIFT) |
+					(rid << CAPWAP_RID_SHIFT) |
 					(CAPWAP_802_11_PAYLOAD << CAPWAP_WBID_SHIFT));
 	if (is_frag) {
 		((uint32_t *)chdr)[0] |= CAPWAP_F_FRAG;
@@ -1268,7 +1291,7 @@ static int ieee8023_to_sta(struct worker *w, const unsigned char *mac, const uns
 		uatomic_add(&sta->send_bytes, len);
 
 		/* queue packet to WTP */
-		ieee8023_to_wtp(w, wtp, buffer, len);
+		ieee8023_to_wtp(w, wtp, sta->rid, buffer, len);
 	}
 
 	rcu_read_unlock();
@@ -1288,7 +1311,8 @@ static int ieee8023_bcast_to_wtps(struct worker *w, const unsigned char *buffer,
 
 		if (uatomic_read(&wtp->sta_count) != 0)
 			/* queue packet to WTP */
-			ieee8023_to_wtp(w, wtp, buffer, len);
+			/* TODO: better selection for RID */
+			ieee8023_to_wtp(w, wtp, 1, buffer, len);
 	}
 
 	rcu_read_unlock();
