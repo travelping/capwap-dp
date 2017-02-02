@@ -3,6 +3,14 @@ capwap-dp
 
 CAPWAP Datapath element
 
+Version 1.0.7 - 02 Feb 2017
+---------------------------
+
+* released under the AGPL
+* handle ICMP fragmentation needed error, adjust MTU
+* make DF bit handling configurable
+* report statistics counter on station remove
+
 Version 1.0.6 - 11 Feb 2015
 ---------------------------
 
