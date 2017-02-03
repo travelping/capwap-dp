@@ -1,0 +1,24 @@
+sudo: true
+
+language: c
+
+compiler:
+  - clang
+  - gcc
+
+services:
+  - docker
+
+script:
+  - docker run -v `pwd`:/build ubuntu:16.04
+    sh -c "
+       apt-get -qq update &&
+       apt-get -y install build-essential automake autoconf libtool pkg-config shtool libev-dev libsystemd-dev erlang-dev liburcu-dev libconfig-dev &&
+       cd /build &&
+       ./autogen.sh &&
+       ./configure &&
+       make
+    "
+
+before_install:
+  - docker pull ubuntu:16.04
