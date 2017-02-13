@@ -388,6 +388,9 @@ struct ieee80211_hdr {
 
 #define IEEE80211_FC(type, stype) host_to_le16((type << 2) | (stype << 4))
 
+#define IEEE80211_QOS_CTL_LEN           2
+#define IEEE80211_HT_CTL_LEN            4
+
 struct ieee80211_mgmt {
 	le16 frame_control;
 	le16 duration;

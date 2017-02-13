@@ -498,7 +498,6 @@ static void handle_capwap_packet(struct worker *w, struct client *wtp, struct ms
 
 	case CAPWAP_802_11_PAYLOAD: {
 		struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)data;
-		struct ether_header *ether;
 		uint16_t fc = le_to_host16(hdr->frame_control);
 
 		debug("FrameType: %04x", fc);
@@ -510,19 +509,43 @@ static void handle_capwap_packet(struct worker *w, struct client *wtp, struct ms
 			return;
 		}
 		else if (WLAN_FC_GET_TYPE(fc) == WLAN_FC_TYPE_DATA &&
-			 (fc & (WLAN_FC_TODS | WLAN_FC_FROMDS)) == WLAN_FC_FROMDS) {
+			 (fc & (WLAN_FC_TODS | WLAN_FC_FROMDS)) == WLAN_FC_TODS) {
+			unsigned int hdrlen = sizeof(struct ieee80211_hdr);
+			uint16_t ethertype;
+			uint8_t *payload;
+
+			if (WLAN_FC_GET_STYPE(fc) == WLAN_FC_STYPE_QOS_DATA) {
+				hdrlen += IEEE80211_QOS_CTL_LEN;
+
+				if ((fc & WLAN_FC_ORDER) != 0)
+					hdrlen += IEEE80211_HT_CTL_LEN;
+			}
+
+			payload = data + hdrlen;
+			ethertype = (payload[6] << 8) | payload[7];
+
 			debug("addr1: " PRIsMAC, ARGsMAC(hdr->addr1));
 			debug("addr2: " PRIsMAC, ARGsMAC(hdr->addr2));
 			debug("addr3: " PRIsMAC, ARGsMAC(hdr->addr3));
 
-			ether = (struct ether_header *)&hdr->addr1;
-			memcpy(&ether->ether_shost, &hdr->addr3, ETH_ALEN);
+			switch (ethertype) {
+			case ETH_P_PAE:
+				capwap_in(addr, radio_mac, radio_mac_len, buffer, len);
+				break;
 
-			forward_capwap(w, wtp, addr, rid, radio_mac, radio_mac_len, ether,
-				       data + sizeof(struct ieee80211_hdr), datalen - sizeof(struct ieee80211_hdr));
+			default: {
+				struct ether_header *ether = (struct ether_header *)&hdr->addr1;
+				memcpy(&ether->ether_shost, &hdr->addr3, ETH_ALEN);
+
+				forward_capwap(w, wtp, addr, rid, radio_mac, radio_mac_len, ether,
+					       data + hdrlen, datalen - hdrlen);
+				break;
+			}
+			}
 		} else {
 			/* wrong direction / unknown / unhandled WLAN frame - ignore */
-			debug("ignoring: type %d, To/From %d", WLAN_FC_GET_TYPE(fc), (fc & (WLAN_FC_TODS | WLAN_FC_FROMDS)));
+			debug("ignoring: type %d, To/From %x",
+			      WLAN_FC_GET_TYPE(fc), (fc & (WLAN_FC_TODS | WLAN_FC_FROMDS)));
 			return;
 		}
 		break;

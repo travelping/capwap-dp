@@ -7,6 +7,7 @@ Version 1.1.0 - unreleased
 --------------------------
 
 * support for multiple radios and wlans per WTP
+* forward PAE (IEEE 802.1X Authentication) frames to control path
 
 Version 1.0.7 - 02 Feb 2017
 ---------------------------
