@@ -3,7 +3,7 @@ capwap-dp
 
 CAPWAP Datapath element
 
-Version 1.1.0 - unreleased
+Version 1.1.0 - 16 Feb 2017
 --------------------------
 
 * support for multiple radios and wlans per WTP
