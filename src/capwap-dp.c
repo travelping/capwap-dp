@@ -62,6 +62,8 @@ void* ei_malloc (long size);
 #include "capwap-dp.h"
 #include "netns.h"
 
+#define API_VERSION      1
+
 static const char _ident[] = "capwap-dp v" VERSION;
 static const char _build[] = "build on " __DATE__ " " __TIME__ " with gcc " __VERSION__;
 
@@ -402,8 +404,11 @@ static void erl_bind(struct controller *cnt, int arity, ei_x_buff *x_in, ei_x_bu
 	if (arity != 2
 	    || ei_decode_pid(x_in->buff, &x_in->index, &cnt->bind_pid) != 0)
 		ei_x_encode_atom(x_out, "badarg");
-	else
+	else {
+		ei_x_encode_tuple_header(x_out, 2);
 		ei_x_encode_atom(x_out, "ok");
+		ei_x_encode_ulong(x_out, API_VERSION);
+	}
 }
 
 static void erl_clear(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
