@@ -399,19 +399,21 @@ static void forward_capwap(struct worker *w, struct client *wtp, const struct so
 			   struct ether_header *ether, unsigned char *data, unsigned int len)
 {
 	struct station *sta;
-	struct iovec iov[2];
 	int r __attribute__((unused));
 
 	rcu_read_lock();
 
 	debug("fwd CW ether: " PRIsMAC, ARGsMAC(ether->ether_shost));
 	if ((sta = find_station(ether->ether_shost)) != NULL) {
+		struct iovec iov[3];
+		uint16_t vlan_tag[2];
+		int i, n;
 
 		debug("found STA %p, STA-WTP %p, WTP %p", sta, sta->wtp, wtp);
 
 		if (radio_mac_len == sizeof(sta->bssid) &&
 		    memcmp(radio_mac, sta->bssid, radio_mac_len) != 0) {
-			debug("got CAPWAP DP fro Station on unexpected RADIO MAC "
+			debug("got CAPWAP DP from Station on unexpected RADIO MAC "
 			      "(got: "PRIsMAC", expected: "PRIsMAC"), ignoring",
 			    ARGsMAC(radio_mac), ARGsMAC(sta->bssid));
 			goto out_unlock;
@@ -427,16 +429,30 @@ static void forward_capwap(struct worker *w, struct client *wtp, const struct so
 		uatomic_inc(&sta->rcvd_pkts);
 		uatomic_add(&sta->rcvd_bytes, len + ETH_ALEN * 2);
 
+		n = 0;
+
 		/* FIXME: shortcat write */
-		iov[0].iov_base = ether;
-		iov[0].iov_len = ETH_ALEN * 2;
-		iov[1].iov_base = data;
-		iov[1].iov_len = len;
+		iov[n].iov_base = ether;
+		iov[n].iov_len = ETH_ALEN * 2;
+		n++;
 
-		hexdump(iov[0].iov_base, iov[0].iov_len);
-		hexdump(iov[1].iov_base, iov[1].iov_len);
+		if (sta->vlan != 0) {
+			vlan_tag[0] = htons(ETHERTYPE_VLAN);
+			vlan_tag[1] = htons(sta->vlan);
 
-		if ((r = writev(w->tap_fd, iov, 2)) < 0) {
+			iov[n].iov_base = vlan_tag;
+			iov[n].iov_len = 4;
+			n++;
+		}
+
+		iov[n].iov_base = data;
+		iov[n].iov_len = len;
+		n++;
+
+		for (i = 0; i < n; i++)
+			hexdump(iov[i].iov_base, iov[i].iov_len);
+
+		if ((r = writev(w->tap_fd, iov, n)) < 0) {
 			debug("writev: %m");
 		}
 		debug("fwd CW writev: %d", r);
@@ -1292,7 +1308,8 @@ static int ieee8023_to_wtp(struct worker *w, struct client *wtp, unsigned int ri
 	return 1;
 }
 
-static int ieee8023_to_sta(struct worker *w, const unsigned char *mac, const unsigned char *buffer, ssize_t len)
+static int ieee8023_to_sta(struct worker *w, const unsigned char *mac, uint16_t vlan,
+			   const unsigned char *buffer, ssize_t len)
 {
 	struct station *sta;
 	struct client *wtp = NULL;
@@ -1301,9 +1318,14 @@ static int ieee8023_to_sta(struct worker *w, const unsigned char *mac, const uns
 
 	rcu_read_lock();
 
-	if ((sta = find_station(mac)) != NULL)
-		wtp = rcu_dereference(sta->wtp);
+	sta = find_station(mac);
+	if (!sta)
+		goto out_unlock;
 
+	if (sta->vlan != vlan)
+		goto out_unlock;
+
+	wtp = rcu_dereference(sta->wtp);
 	if (wtp) {
 		/* the STA and WTP pointers are under RCU protection, so no-one will free them
 		 * as long as we hold the RCU read lock */
@@ -1317,12 +1339,12 @@ static int ieee8023_to_sta(struct worker *w, const unsigned char *mac, const uns
 		ieee8023_to_wtp(w, wtp, sta->rid, buffer, len);
 	}
 
+out_unlock:
 	rcu_read_unlock();
-
 	return 1;
 }
 
-static int ieee8023_bcast_to_wtps(struct worker *w, const unsigned char *buffer, ssize_t len)
+static int ieee8023_bcast_to_wtps(struct worker *w, uint16_t vlan, const unsigned char *buffer, ssize_t len)
 {
 	struct cds_lfht_iter iter;      /* For iteration on hash table */
 	struct client *wtp;
@@ -1332,10 +1354,11 @@ static int ieee8023_bcast_to_wtps(struct worker *w, const unsigned char *buffer,
 	cds_lfht_for_each_entry(ht_clients, &iter, wtp, node) {
 		debug("WTP %p, stations: %d", wtp, uatomic_read(&wtp->sta_count));
 
-		if (uatomic_read(&wtp->sta_count) != 0)
+		if (uatomic_read(&wtp->sta_count) != 0) {
 			/* queue packet to WTP */
 			/* TODO: better selection for RID */
 			ieee8023_to_wtp(w, wtp, 1, buffer, len);
+		}
 	}
 
 	rcu_read_unlock();
@@ -1343,7 +1366,7 @@ static int ieee8023_bcast_to_wtps(struct worker *w, const unsigned char *buffer,
 	return 1;
 }
 
-static void tap_multicast(struct worker *w, unsigned char *buffer, ssize_t len)
+static void tap_multicast(struct worker *w, uint16_t vlan, unsigned char *buffer, ssize_t len)
 {
 	struct ether_header *ether = (struct ether_header *)buffer;
 
@@ -1368,7 +1391,7 @@ static void tap_multicast(struct worker *w, unsigned char *buffer, ssize_t len)
 
 				if (dhcp->htype == 1 && dhcp->hlen == 6) {
 					/* forward DHCP broadcast to STA */
-					if (ieee8023_to_sta(w, dhcp->chaddr, buffer, len))
+					if (ieee8023_to_sta(w, dhcp->chaddr, vlan, buffer, len))
 						/* success */
 						return;
 				}
@@ -1383,7 +1406,7 @@ static void tap_multicast(struct worker *w, unsigned char *buffer, ssize_t len)
 
 		if (plen >= (sizeof(struct ip6_hdr) + sizeof(struct icmp6_hdr)) &&
 		    ip6->ip6_nxt == IPPROTO_ICMPV6 && icmp->icmp6_type == ND_ROUTER_ADVERT)
-			if (ieee8023_bcast_to_wtps(w, buffer, len))
+			if (ieee8023_bcast_to_wtps(w, vlan, buffer, len))
 				/* success */
 				return;
 
@@ -1394,15 +1417,33 @@ static void tap_multicast(struct worker *w, unsigned char *buffer, ssize_t len)
 	packet_in_tap(buffer, len);
 }
 
-static void tap_unicast(struct worker *w, unsigned char *buffer, ssize_t len)
+static void tap_unicast(struct worker *w, uint16_t vlan, unsigned char *buffer, ssize_t len)
 {
 	struct ether_header *ether = (struct ether_header *)buffer;
 
 	debug("dst unicast ether: " PRIsMAC, ARGsMAC(ether->ether_dhost));
 	debug("ether unicast type: %04x", ntohs(ether->ether_type));
 
-	if (!ieee8023_to_sta(w, ether->ether_dhost, buffer, len))
+	if (!ieee8023_to_sta(w, ether->ether_dhost, vlan, buffer, len))
 		packet_in_tap(buffer, len);
+}
+
+static uint16_t strip_vlan_tag(unsigned char **buffer, ssize_t *len)
+{
+	struct ether_header *ether = (struct ether_header *)*buffer;
+	uint16_t vlan;
+
+	if (ntohs(ether->ether_type) != ETHERTYPE_VLAN)
+		return 0;
+
+	vlan = ntohs(*(uint16_t *)(*buffer + sizeof(struct ether_header)));
+
+	/* remove VLAN tag */
+	memmove(*buffer + 4, *buffer, ETH_ALEN * 2);
+	*buffer += 4;
+	*len -= 4;
+
+	return vlan;
 }
 
 static void tap_cb(EV_P_ ev_io *ev, int revents)
@@ -1415,16 +1456,19 @@ static void tap_cb(EV_P_ ev_io *ev, int revents)
 	debug("read from %d", ev->fd);
 
 	while (cnt > 0 && (r = read(ev->fd, buffer, sizeof(buffer))) > 0) {
-		struct ether_header *ether = (struct ether_header *)&buffer;
+		unsigned char *buf = buffer;
+		uint16_t vlan;
 
 		debug("read %zd bytes", r);
 //		hexdump(buffer, r);
 
+		vlan = strip_vlan_tag(&buf, &r);
+
 		if (r >= sizeof(struct ether_header)) {
-			if ((ether->ether_dhost[0] & 0x01) != 0)
-				tap_multicast(w, buffer, r);
+			if ((((struct ether_header *)buf)->ether_dhost[0] & 0x01) != 0)
+				tap_multicast(w, vlan, buf, r);
 			else
-				tap_unicast(w, buffer, r);
+				tap_unicast(w, vlan, buf, r);
 		}
 
 		cnt--;

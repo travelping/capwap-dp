@@ -35,6 +35,8 @@ extern int honor_df;
 extern int unknown_wtp_limit_interval;
 extern int unknown_wtp_limit_bucket;
 
+#define MAX_RADIOS 32
+
 #define MAX_FRAGMENTS 32
 #define FRGMT_BUFFER (8 * 1024)
 #define FRGMT_MAX 16
@@ -79,6 +81,7 @@ struct station {
 
 	struct client *wtp;
 	uint8_t ether[ETH_ALEN];
+	uint16_t vlan;
 	unsigned int rid;
 	uint8_t bssid[ETH_ALEN];
 
