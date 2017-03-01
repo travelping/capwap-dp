@@ -36,6 +36,7 @@ extern int unknown_wtp_limit_interval;
 extern int unknown_wtp_limit_bucket;
 
 #define MAX_RADIOS 32
+#define MAX_WLANS 16
 
 #define MAX_FRAGMENTS 32
 #define FRGMT_BUFFER (8 * 1024)
@@ -101,6 +102,7 @@ struct client {
 	uint16_t fragment_id;
 	unsigned int sta_count;
 	struct cds_hlist_head stations;
+	struct cds_hlist_head wlans;
 	struct frgmt_buffer frgmt_buffer;
 
 	unsigned long rcvd_pkts;
@@ -114,6 +116,18 @@ struct client {
 	unsigned long err_invalid_station;
 	unsigned long err_fragment_invalid;
 	unsigned long err_fragment_too_old;
+};
+
+struct wlan {
+	struct rcu_head rcu_head;          /* For call_rcu() */
+	struct urcu_ref ref;
+	struct cds_hlist_node wlan_list;
+
+	unsigned int rid;
+	unsigned int wlan_id;
+
+	uint8_t bssid[ETH_ALEN];
+	uint16_t vlan;
 };
 
 struct worker {
@@ -173,6 +187,7 @@ void detach_station_from_wtp(struct station *);
 
 struct client *add_wtp(const struct sockaddr *, unsigned int mtu);
 
+void  __delete_wlan(struct wlan *wlan);
 int __delete_station(struct station *sta);
 int __delete_wtp(struct client *wtp);
 

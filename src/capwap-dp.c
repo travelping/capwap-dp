@@ -280,6 +280,15 @@ static void ei_x_encode_ether(ei_x_buff *x, uint8_t *ether)
 	ei_x_encode_binary(x, (void *)ether, ETH_ALEN);
 }
 
+static void ei_x_encode_wlan(ei_x_buff *x, struct wlan *wlan)
+{
+	ei_x_encode_tuple_header(x, 4);
+	ei_x_encode_ulong(x, wlan->rid);
+	ei_x_encode_ulong(x, wlan->wlan_id);
+	ei_x_encode_ether(x, wlan->bssid);
+	ei_x_encode_ulong(x, wlan->vlan);
+}
+
 static void ei_x_encode_sta(ei_x_buff *x, struct station *sta)
 {
 	ei_x_encode_tuple_header(x, 5);
@@ -297,9 +306,15 @@ static void ei_x_encode_sta(ei_x_buff *x, struct station *sta)
 static void ei_x_encode_wtp(ei_x_buff *x, struct client *clnt)
 {
 	struct station *sta;
+	struct wlan *wlan;
 
-	ei_x_encode_tuple_header(x, 5);
+	ei_x_encode_tuple_header(x, 6);
 	ei_x_encode_sockaddr(x, (struct sockaddr *)&clnt->addr);
+	cds_hlist_for_each_entry_rcu_2(wlan, &clnt->wlans, wlan_list) {
+		ei_x_encode_list_header(x, 1);
+		ei_x_encode_wlan(x, wlan);
+	}
+	ei_x_encode_empty_list(x);
 	cds_hlist_for_each_entry_rcu_2(sta, &clnt->stations, wtp_list) {
 		ei_x_encode_list_header(x, 1);
 		ei_x_encode_sta(x, sta);
@@ -530,6 +545,117 @@ static void erl_get_wtp(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 	rcu_read_unlock();
 }
 
+static struct wlan *find_wlan(struct client *clnt, unsigned long rid, unsigned long wlan_id)
+{
+	struct wlan *wlan;
+
+	cds_hlist_for_each_entry_2(wlan, &clnt->wlans, wlan_list) {
+		if (wlan->rid == rid && wlan->wlan_id == wlan_id)
+			return wlan;
+	}
+
+	return NULL;
+}
+
+static void erl_add_wlan(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
+{
+	struct wlan *wlan;
+	struct client *clnt;
+	struct sockaddr_storage addr;
+	unsigned long rid;
+	unsigned long wlan_id;
+	uint8_t bssid[ETH_ALEN];
+	unsigned long vlan;
+
+	if (arity != 6) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
+
+	if (ei_decode_sockaddr(x_in->buff, &x_in->index, &addr) != 0
+	    || ei_decode_ulong(x_in->buff, &x_in->index, &rid) != 0
+	    || rid == 0 || rid >= MAX_RADIOS
+	    || ei_decode_ulong(x_in->buff, &x_in->index, &wlan_id) != 0
+	    || wlan_id == 0 || wlan_id >= MAX_WLANS
+	    || ei_decode_ether(x_in->buff, &x_in->index, bssid) != 0
+	    || ei_decode_ulong(x_in->buff, &x_in->index, &vlan) != 0) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
+
+	rcu_read_lock();
+
+	if ((clnt = find_wtp((struct sockaddr *)&addr)) == NULL) {
+		ei_x_encode_atom(x_out, "not_found");
+		goto out_unlock;
+	}
+
+	if (find_wlan(clnt, rid, wlan_id) != NULL) {
+		ei_x_encode_atom(x_out, "duplicate");
+		goto out_unlock;
+	}
+
+	wlan = calloc(1, sizeof(struct wlan));
+	if (!wlan) {
+		ei_x_encode_atom(x_out, "enomem");
+		goto out_unlock;
+	}
+
+	wlan->rid = rid;
+	wlan->wlan_id = wlan_id;
+	memcpy(&wlan->bssid, &bssid, sizeof(bssid));
+	wlan->vlan = vlan;
+
+	/*
+	 * list mutating operations need mutal exclusion,
+	 * this is currently guaranteed since only the
+	 * control thread is permitted to call this
+	 */
+	cds_hlist_add_head_rcu(&wlan->wlan_list, &clnt->wlans);
+
+	ei_x_encode_atom(x_out, "ok");
+
+out_unlock:
+	rcu_read_unlock();
+}
+
+static void erl_del_wlan(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
+{
+	struct wlan *wlan;
+	struct client *clnt;
+	struct sockaddr_storage addr;
+	unsigned long rid;
+	unsigned long wlan_id;
+
+	if (arity != 3) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
+
+	if (ei_decode_sockaddr(x_in->buff, &x_in->index, &addr) != 0
+	    || ei_decode_ulong(x_in->buff, &x_in->index, &rid) != 0
+	    || ei_decode_ulong(x_in->buff, &x_in->index, &wlan_id) != 0) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
+
+	rcu_read_lock();
+
+	if ((clnt = find_wtp((struct sockaddr *)&addr)) == NULL) {
+		ei_x_encode_atom(x_out, "not_found");
+		goto out_unlock;
+	}
+
+	if ((wlan = find_wlan(clnt, rid, wlan_id)) != NULL) {
+		__delete_wlan(wlan);
+		ei_x_encode_atom(x_out, "ok");
+	} else
+		ei_x_encode_atom(x_out, "not_found");
+
+out_unlock:
+	rcu_read_unlock();
+}
+
 static void erl_attach_station(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 {
 	struct station *sta;
@@ -722,6 +848,12 @@ static void handle_gen_call_capwap(struct controller *cnt, const char *fn, int a
 	}
 	else if (strncmp(fn, "get_wtp", 7) == 0) {
 		erl_get_wtp(arity, x_in, x_out);
+	}
+	if (strncmp(fn, "add_wlan", 8) == 0) {
+		erl_add_wlan(arity, x_in, x_out);
+	}
+	else if (strncmp(fn, "del_wlan", 8) == 0) {
+		erl_del_wlan(arity, x_in, x_out);
 	}
 	else if (strncmp(fn, "attach_station", 14) == 0) {
 		erl_attach_station(arity, x_in, x_out);

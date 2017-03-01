@@ -132,6 +132,12 @@ static inline void refcount_put_client(struct client *clnt)
 	urcu_ref_put(&clnt->ref, ref_free_client);
 }
 
+static void rcu_free_wlan(struct rcu_head *head)
+{
+	struct wlan *wlan = caa_container_of(head, struct wlan, rcu_head);
+	free(wlan);
+}
+
 static void rcu_free_station(struct rcu_head *head)
 {
 	struct station *sta = caa_container_of(head, struct station, rcu_free);
@@ -312,6 +318,7 @@ struct client *add_wtp(const struct sockaddr *addr, unsigned int mtu)
 	urcu_ref_init(&wtp->ref);
 	cds_lfht_node_init(&wtp->node);
 	CDS_INIT_HLIST_HEAD(&wtp->stations);
+	CDS_INIT_HLIST_HEAD(&wtp->wlans);
 	pthread_mutex_init(&wtp->frgmt_buffer.lock, 0);
 	memcpy(&wtp->addr, addr, sizeof(wtp->addr));
 	wtp->mtu = mtu;
@@ -335,6 +342,17 @@ struct client *add_wtp(const struct sockaddr *addr, unsigned int mtu)
 	return wtp;
 }
 
+void __delete_wlan(struct wlan *wlan)
+{
+	/*
+	 * list mutating operations need mutal exclusion,
+	 * this is currently guaranteed since only the
+	 * control thread is permitted to call this
+	 */
+	cds_hlist_del_rcu(&wlan->wlan_list);
+	call_rcu(&wlan->rcu_head, rcu_free_wlan);
+}
+
 int __delete_station(struct station *sta)
 {
 	int r;
@@ -352,6 +370,7 @@ int __delete_wtp(struct client *wtp)
 {
 	int r;
 	struct station *sta, *n;
+	struct wlan *wlan, *w;
 
 	/*
 	 * list and hash mutating operations need mutal exclusion,
@@ -361,6 +380,9 @@ int __delete_wtp(struct client *wtp)
 
 	cds_hlist_for_each_entry_safe_2(sta, n, &wtp->stations, wtp_list)
 		__delete_station(sta);
+
+	cds_hlist_for_each_entry_safe_2(wlan, w, &wtp->wlans, wlan_list)
+		__delete_wlan(wlan);
 
 	if ((r = (cds_lfht_del(ht_clients, &wtp->node) == 0)))
 		call_rcu(&wtp->rcu_head, rcu_release_wtp);
