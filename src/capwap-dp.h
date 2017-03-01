@@ -246,4 +246,11 @@ enum capwap_payload_t {
 	CAPWAP_802_11_PAYLOAD = 1
 };
 
+struct ieee80211_wbinfo{
+	uint8_t length;
+	uint16_t wlan_id_bitmap;
+	uint16_t reserved;
+} __attribute__ ((packed));
+
+
 #endif // __CAPWAP_DP_H

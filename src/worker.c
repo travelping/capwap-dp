@@ -1388,16 +1388,34 @@ static int ieee8023_bcast_to_wtps(struct worker *w, uint16_t vlan, const unsigne
 {
 	struct cds_lfht_iter iter;      /* For iteration on hash table */
 	struct client *wtp;
+	struct wlan *wlan;
+	struct ieee80211_wbinfo wbinfo[MAX_RADIOS];
+
+	memset(wbinfo, 0, sizeof(wbinfo));
 
 	rcu_read_lock();
 
 	cds_lfht_for_each_entry(ht_clients, &iter, wtp, node) {
 		debug("WTP %p, stations: %d", wtp, uatomic_read(&wtp->sta_count));
 
-		if (uatomic_read(&wtp->sta_count) != 0) {
-			/* queue packet to WTP */
-			/* TODO: better selection for RID */
-			ieee8023_to_wtp(w, wtp, 1, NULL, 0, buffer, len);
+		if (uatomic_read(&wtp->sta_count) == 0)
+			continue;
+
+		cds_hlist_for_each_entry_rcu_2(wlan, &wtp->wlans, wlan_list) {
+			if (wlan->vlan != vlan)
+				continue;
+
+			wbinfo[wlan->rid].wlan_id_bitmap |= htons(1 << (wlan->wlan_id - 1));
+		}
+
+		/* queue packet to WTP */
+		for (int rid = 1; rid < MAX_RADIOS; rid++) {
+			if (wbinfo[rid].wlan_id_bitmap == 0)
+				continue;
+
+			wbinfo[rid].length = 4;
+			ieee8023_to_wtp(w, wtp, rid, (unsigned char *)&wbinfo[rid],
+					sizeof(struct ieee80211_wbinfo), buffer, len);
 		}
 	}
 
