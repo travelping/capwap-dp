@@ -1228,11 +1228,13 @@ static int send_icmp_pkt_to_big(struct worker *w, unsigned int mtu, const unsign
 }
 
 static int ieee8023_to_wtp(struct worker *w, struct client *wtp, unsigned int rid,
+			   const unsigned char *wbinfo, ssize_t wbinfo_len,
 			   const unsigned char *buffer, ssize_t len)
 {
 	ssize_t r __attribute__((unused));
 	struct iovec iov[2];
 	struct msghdr mh;
+	int piov;
 
 	ssize_t hlen;
 	unsigned char chdr[32];
@@ -1246,6 +1248,10 @@ static int ieee8023_to_wtp(struct worker *w, struct client *wtp, unsigned int ri
 
 	/* TODO: calculate hlen based on binding and optional header */
 	hlen = 2;
+
+	if (wbinfo != NULL && wbinfo_len != 0)
+		hlen += (wbinfo_len + 3) / 4;
+
 	mtu = uatomic_read(&wtp->mtu);
 
 	max_len = mtu - sizeof(struct iphdr) - sizeof(struct udphdr) - hlen * 4;
@@ -1275,6 +1281,10 @@ static int ieee8023_to_wtp(struct worker *w, struct client *wtp, unsigned int ri
 	((uint32_t *)chdr)[0] = htobe32((hlen << CAPWAP_HLEN_SHIFT) |
 					(rid << CAPWAP_RID_SHIFT) |
 					(CAPWAP_802_11_PAYLOAD << CAPWAP_WBID_SHIFT));
+
+	if (wbinfo != NULL && wbinfo_len != 0)
+		((uint32_t *)chdr)[0] |= CAPWAP_F_WSI;
+
 	if (is_frag) {
 		((uint32_t *)chdr)[0] |= CAPWAP_F_FRAG;
 		uatomic_inc(&w->send_fragments);
@@ -1282,21 +1292,27 @@ static int ieee8023_to_wtp(struct worker *w, struct client *wtp, unsigned int ri
 	}
 	((uint32_t *)chdr)[1] = htobe32(frag_id << CAPWAP_FRAG_ID_SHIFT);
 
-	/* no RADIO MAC */
-	/* no WSI */
-
 	/* The message header contains parameters for sendmsg.    */
 	memset(&mh, 0, sizeof(mh));
 	mh.msg_name = (caddr_t)&wtp->addr;
 	mh.msg_namelen = sizeof(wtp->addr);
 	mh.msg_iov = iov;
-	mh.msg_iovlen = 2;
 
 	iov[0].iov_base = chdr;
 	iov[0].iov_len = hlen * 4;
 
-	iov[1].iov_base = (unsigned char *)buffer;
-	iov[1].iov_len = frag_size;
+	piov = 1;
+	if (wbinfo != NULL && wbinfo_len != 0) {
+		/* WSI */
+		iov[piov].iov_base = (unsigned char *)wbinfo;
+		iov[piov].iov_len = wbinfo_len;
+		piov++;
+	}
+
+	iov[piov].iov_base = (unsigned char *)buffer;
+	iov[piov].iov_len = frag_size;
+
+	mh.msg_iovlen = piov + 1;
 
 	ssize_t offs = 0;
 
@@ -1306,14 +1322,9 @@ static int ieee8023_to_wtp(struct worker *w, struct client *wtp, unsigned int ri
 			SET_CAPWAP_HEADER_FIELD(&((uint32_t *)chdr)[1], offs / 8, CAPWAP_FRAG_OFFS_MASK, CAPWAP_FRAG_OFFS_SHIFT);
 			if (frag_count == 1) {
 				((uint32_t *)chdr)[0] |= CAPWAP_F_LASTFRAG;
-				iov[1].iov_len = len % frag_size;
+				iov[piov].iov_len = len % frag_size;
 			}
 		}
-
-		uatomic_inc(&w->send_pkts);
-		uatomic_inc(&wtp->send_pkts);
-		uatomic_add(&w->send_bytes, iov[0].iov_len + iov[1].iov_len);
-		uatomic_add(&wtp->send_bytes, iov[0].iov_len + iov[1].iov_len);
 
 		/* FIXME: shortcat write, we do want to use NON-BLOCKING send here and
 		 *        switch to write_ev should it block....
@@ -1323,7 +1334,14 @@ static int ieee8023_to_wtp(struct worker *w, struct client *wtp, unsigned int ri
 
 		debug("fwd tap sendmsg: %zd", r);
 
-		iov[1].iov_base = (unsigned char *)iov[1].iov_base + frag_size;
+		if (r > 0) {
+			uatomic_inc(&w->send_pkts);
+			uatomic_inc(&wtp->send_pkts);
+			uatomic_add(&w->send_bytes, r);
+			uatomic_add(&wtp->send_bytes, r);
+		}
+
+		iov[piov].iov_base = (unsigned char *)iov[piov].iov_base + frag_size;
 		offs += frag_size;
 	}
 
@@ -1358,7 +1376,7 @@ static int ieee8023_to_sta(struct worker *w, const unsigned char *mac, uint16_t 
 		uatomic_add(&sta->send_bytes, len);
 
 		/* queue packet to WTP */
-		ieee8023_to_wtp(w, wtp, sta->rid, buffer, len);
+		ieee8023_to_wtp(w, wtp, sta->rid, NULL, 0, buffer, len);
 	}
 
 out_unlock:
@@ -1379,7 +1397,7 @@ static int ieee8023_bcast_to_wtps(struct worker *w, uint16_t vlan, const unsigne
 		if (uatomic_read(&wtp->sta_count) != 0) {
 			/* queue packet to WTP */
 			/* TODO: better selection for RID */
-			ieee8023_to_wtp(w, wtp, 1, buffer, len);
+			ieee8023_to_wtp(w, wtp, 1, NULL, 0, buffer, len);
 		}
 	}
 
