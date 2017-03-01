@@ -173,7 +173,7 @@ extern struct cds_lfht *ht_clients;	/* Hash table */
 #define SIN_ADDR_PTR(addr) ((((struct sockaddr *)(addr))->sa_family == AF_INET) ? (void *)&(((struct sockaddr_in *)(addr))->sin_addr) : (void *)&(((struct sockaddr_in6 *)(addr))->sin6_addr))
 #define SIN_PORT(addr) ((((struct sockaddr *)(addr))->sa_family == AF_INET) ? (((struct sockaddr_in *)(addr))->sin_port) : (((struct sockaddr_in6 *)(addr))->sin6_port))
 
-void packet_in_tap(const unsigned char *, ssize_t);
+void packet_in_tap(uint16_t vlan, const unsigned char *, ssize_t);
 void capwap_in(const struct sockaddr *, const unsigned char *, unsigned int, const unsigned char *, ssize_t);
 
 int start_worker(size_t);

@@ -1157,16 +1157,17 @@ void capwap_in(const struct sockaddr *addr,
 	control_enqueue(&x);
 }
 
-void packet_in_tap(const unsigned char *buf, ssize_t len)
+void packet_in_tap(uint16_t vlan, const unsigned char *buf, ssize_t len)
 {
 	ei_x_buff x;
 
 	/* prealloc enough space to hold the data plus the Erlang encoded meta data */
 	ei_x_new_size(&x, 48 + len);
 	ei_x_encode_version(&x);
-	ei_x_encode_tuple_header(&x, 3);
+	ei_x_encode_tuple_header(&x, 4);
 	ei_x_encode_atom(&x, "packet_in");
 	ei_x_encode_atom(&x, "tap");
+	ei_x_encode_ulong(&x, vlan);
 	ei_x_encode_binary(&x, (void *)buf, len);
 
 	control_enqueue(&x);

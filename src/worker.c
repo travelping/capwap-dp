@@ -1484,7 +1484,7 @@ static void tap_multicast(struct worker *w, uint16_t vlan, unsigned char *buffer
 	}
 	}
 
-	packet_in_tap(buffer, len);
+	packet_in_tap(vlan, buffer, len);
 }
 
 static void tap_unicast(struct worker *w, uint16_t vlan, unsigned char *buffer, ssize_t len)
@@ -1495,7 +1495,7 @@ static void tap_unicast(struct worker *w, uint16_t vlan, unsigned char *buffer, 
 	debug("ether unicast type: %04x", ntohs(ether->ether_type));
 
 	if (!ieee8023_to_sta(w, ether->ether_dhost, vlan, buffer, len))
-		packet_in_tap(buffer, len);
+		packet_in_tap(vlan, buffer, len);
 }
 
 static uint16_t strip_vlan_tag(unsigned char **buffer, ssize_t *len)
