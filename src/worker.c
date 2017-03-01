@@ -1343,6 +1343,16 @@ static int ieee8023_to_wtp(struct worker *w, struct client *wtp, unsigned int ri
 			uatomic_add(&wtp->send_bytes, r);
 		}
 
+		if (caa_unlikely(((uint32_t *)chdr)[0] & CAPWAP_F_WSI)) {
+			/* don't send WSI on following fragements */
+			piov--;
+			mh.msg_iovlen--;
+
+			((uint32_t *)chdr)[0] &= ~CAPWAP_F_WSI;
+			iov[piov].iov_base = (unsigned char *)buffer;
+			iov[piov].iov_len = frag_size;
+		}
+
 		iov[piov].iov_base = (unsigned char *)iov[piov].iov_base + frag_size;
 		offs += frag_size;
 	}
