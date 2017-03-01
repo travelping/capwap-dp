@@ -67,6 +67,8 @@
 #include "netns.h"
 #include "dhcp_internal.h"
 
+#define VLAN_ID(x)  ((x) & 0x0ffff)
+
 int num_workers;
 struct worker *workers;
 
@@ -1362,7 +1364,7 @@ static int ieee8023_to_sta(struct worker *w, const unsigned char *mac, uint16_t 
 	if (!sta)
 		goto out_unlock;
 
-	if (sta->vlan != vlan)
+	if (VLAN_ID(sta->vlan) != VLAN_ID(vlan))
 		goto out_unlock;
 
 	wtp = rcu_dereference(sta->wtp);
@@ -1402,7 +1404,7 @@ static int ieee8023_bcast_to_wtps(struct worker *w, uint16_t vlan, const unsigne
 			continue;
 
 		cds_hlist_for_each_entry_rcu_2(wlan, &wtp->wlans, wlan_list) {
-			if (wlan->vlan != vlan)
+			if (VLAN_ID(wlan->vlan) != VLAN_ID(vlan))
 				continue;
 
 			wbinfo[wlan->rid].wlan_id_bitmap |= htons(1 << (wlan->wlan_id - 1));
