@@ -420,6 +420,64 @@ static void erl_send_to(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 	ei_x_encode_atom(x_out, "ok");
 }
 
+static void erl_packet_out(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
+{
+	char dst[MAXATOMLEN+1] = {0};
+	unsigned long vlan;
+	ssize_t r __attribute__((unused));
+	const char *bin;
+	long bin_len;
+	struct iovec iov[3];
+	uint16_t vlan_tag[2];
+	int i, n;
+
+	if (arity != 4) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
+
+	if (ei_decode_atom(x_in->buff, &x_in->index, dst) < 0
+	    || ei_decode_ulong(x_in->buff, &x_in->index, &vlan) != 0
+	    || vlan > UINT16_MAX
+	    || ei_decode_binary(x_in->buff, &x_in->index, NULL, &bin_len) != 0
+	    || bin_len < sizeof(struct ether_header)) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+	}
+
+	bin = x_in->buff + x_in->index - bin_len;
+
+	n = 0;
+
+	/* FIXME: shortcat write */
+	iov[n].iov_base = (unsigned char *)bin;
+	iov[n].iov_len = ETH_ALEN * 2;
+	n++;
+
+	if (vlan != 0) {
+		vlan_tag[0] = htons(ETHERTYPE_VLAN);
+		vlan_tag[1] = htons(vlan);
+
+		iov[n].iov_base = vlan_tag;
+		iov[n].iov_len = 4;
+		n++;
+	}
+
+	iov[n].iov_base = (unsigned char *)bin + (ETH_ALEN * 2);
+	iov[n].iov_len = bin_len - 12;
+	n++;
+
+	for (i = 0; i < n; i++)
+		hexdump(iov[i].iov_base, iov[i].iov_len);
+
+	if ((r = writev(workers[send_worker].tap_fd, iov, n)) < 0) {
+		debug("writev: %m");
+	}
+	debug("erl_send_to writev: %zd", r);
+
+	ei_x_encode_atom(x_out, "ok");
+}
+
 static void erl_bind(struct controller *cnt, int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 {
 	if (arity != 2
@@ -835,6 +893,9 @@ static void handle_gen_call_capwap(struct controller *cnt, const char *fn, int a
 {
 	if (strncmp(fn, "sendto", 6) == 0) {
 		erl_send_to(arity, x_in, x_out);
+	}
+	if (strncmp(fn, "packet_out", 10) == 0) {
+		erl_packet_out(arity, x_in, x_out);
 	}
 	if (strncmp(fn, "bind", 4) == 0) {
 		erl_bind(cnt, arity, x_in, x_out);
