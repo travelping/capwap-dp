@@ -3,6 +3,14 @@ capwap-dp
 
 CAPWAP Datapath element
 
+Version 1.2.0 - xx Mar 2017
+---------------------------
+
+* API Version 1
+* the Erlang API is now versioned
+* add 802.1q VLAN to WLAN mapping support
+* add method for sending raw ethernet frames on TAP interface
+
 Version 1.1.0 - 16 Feb 2017
 --------------------------
 
