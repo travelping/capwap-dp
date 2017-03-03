@@ -65,7 +65,7 @@ void* ei_malloc (long size);
 #define API_VERSION      1
 
 static const char _ident[] = "capwap-dp v" VERSION;
-static const char _build[] = "build on " __DATE__ " " __TIME__ " with gcc " __VERSION__;
+static const char _build[] = "built on " __DATE__ " " __TIME__ " with gcc " __VERSION__;
 
 struct control_loop {
 	struct ev_loop *loop;
@@ -1401,10 +1401,11 @@ int main(int argc, char *argv[])
 			{"netns",         1, 0, 'n'},
 			{"port",          1, 0, 'p'},
 			{"v4only",        0, 0, '4'},
+			{"version",       0, 0, 'V'},
 			{0, 0, 0, 0}
 		};
 
-		c = getopt_long(argc, argv, "c:h46i:f:n:p:",
+		c = getopt_long(argc, argv, "c:h46i:f:n:p:V",
 				long_options, &option_index);
 		if (c == -1)
 			break;
@@ -1451,6 +1452,10 @@ int main(int argc, char *argv[])
 			v6only = 1;
 			break;
 
+		case 'V':
+			printf("%s\n", VERSION);
+			exit(0);
+
 		case 'c':
 			config_file = strdup(optarg);
 			break;
@@ -1480,7 +1485,8 @@ int main(int argc, char *argv[])
 			break;
 
 		default:
-			printf("?? getopt returned character code 0%o ??\n", c);
+			printf("invalid option -- '%c'\n", c);
+			exit(EXIT_FAILURE);
 		}
 	}
 
