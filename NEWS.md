@@ -3,7 +3,7 @@ capwap-dp
 
 CAPWAP Datapath element
 
-Version 1.2.0 - xx Mar 2017
+Version 1.2.0 - 03 Mar 2017
 ---------------------------
 
 * API Version 1
