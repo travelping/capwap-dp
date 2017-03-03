@@ -6,7 +6,7 @@ dnl #   standard Autoconf prolog
 
 AC_PREREQ(2.59)
 
-AC_INIT(capwap-dp, [1.0.0])
+AC_INIT(capwap-dp, [1.2.0])
 AC_CONFIG_SRCDIR(src/capwap-dp.c)
 AC_CONFIG_AUX_DIR(config)
 AC_CONFIG_MACRO_DIR([m4])
@@ -15,7 +15,7 @@ AM_INIT_AUTOMAKE(1.9)
 AC_SRCDIR_PREFIX(srcdir_prefix)
 AC_HEADLINE(dnl
 TPOSS CAPWAP Data Path, dnl
-[Copyright (c) 2014 Travelping GmbH <info@travelping.com>])
+[Copyright (c) 2017 Travelping GmbH <info@travelping.com>])
 AM_CONFIG_HEADER(config.h)
 AC_PREFIX_DEFAULT(/usr)
 AC_PLATFORM(PLATFORM)
