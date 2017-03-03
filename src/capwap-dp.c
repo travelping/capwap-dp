@@ -1336,10 +1336,11 @@ static void dp_erl_connect(struct sockaddr_in *addr)
 
 static void usage(void)
 {
-	printf("TPLINO CAPWAP Data Path Deamon, Version: .....\n\n"
+	printf("Travelping CAPWAP Data Path Daemon\n\n"
 	       "Usage: capwap-dp [OPTION...]\n\n"
 	       "Options:\n\n"
 	       "  -h                                this help\n"
+	       "  -V, --version                     show version information\n"
 //               "  --dist=IP                         bind Erlang cluster protocol to interface\n"
 	       "  --sname=NAME                      Erlang node short name\n"
 	       "  -4, --v4only                      CAPWAP IPv4 only socket\n"
