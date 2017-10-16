@@ -38,11 +38,12 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/uio.h>
 #include <pthread.h>
 
+#include <net/ethernet.h>
 #include <linux/if.h>
 #include <linux/if_tun.h>
-#include <net/ethernet.h>
 #include <netinet/ip.h>
 #include <netinet/udp.h>
 #include <netinet/ip_icmp.h>
