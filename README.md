@@ -35,3 +35,10 @@ host network and need network interfaces to be configured beforehand.
 
 To add a custom configuration to the container, a volume may be mounted
 to `/etc/capwap-dp.conf`.
+
+Running
+-------
+
+For running under unprivileged user should add capabilities:
+
+	# sudo setcap CAP_NET_ADMIN,CAP_IPC_LOCK,CAP_SYS_NICE=+eip src/capwap-dp
