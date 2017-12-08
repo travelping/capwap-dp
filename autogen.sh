@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -e
 
 rm -rf autom4te.cache config
 rm -f configure config.h.in
