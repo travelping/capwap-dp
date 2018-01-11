@@ -1,9 +1,10 @@
-FROM bitwalker/alpine-erlang:20.1 AS build-env
+FROM alpine:3.7 AS build-env
 
 RUN mkdir /src && \
     apk update && \
     apk upgrade --no-cache  && \
     apk add --no-cache gcc build-base automake autoconf libtool pkgconf make linux-headers \
+		       erlang-dev \
 		       libconfig-dev \
 		       libev-dev \
 		       userspace-rcu-dev
@@ -22,7 +23,7 @@ RUN cd /src/capwap-dp && \
     ls -lR build && \
     ldd /src/capwap-dp/build/usr/bin/capwap-dp
 
-FROM alpine:latest
+FROM alpine:3.7
 WORKDIR /
 RUN apk update && \
     apk upgrade --no-cache && \
