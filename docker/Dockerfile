@@ -29,4 +29,4 @@ RUN apk update && \
     apk upgrade --no-cache && \
     apk add --no-cache libconfig libev userspace-rcu
 COPY --from=build-env /src/capwap-dp/build /
-ENTRYPOINT /usr/bin/capwap-dp
+ENTRYPOINT [ "/usr/bin/capwap-dp" ]
