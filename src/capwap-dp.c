@@ -37,7 +37,11 @@
 #include <sys/time.h>
 #include <sys/uio.h>
 #include <arpa/inet.h>
+#include <net/if_arp.h>
+#include <sys/ioctl.h>
 #include <getopt.h>
+#include <sys/types.h>
+#include <ifaddrs.h>
 
 #include <urcu.h>               /* RCU flavor */
 #include <urcu/uatomic.h>
@@ -45,6 +49,7 @@
 #include <urcu/rculist.h>       /* RCU list */
 #include <urcu/rculfqueue.h>    /* RCU Lock-free queue */
 #include <urcu/rculfhash.h>	/* RCU Lock-free hash table */
+
 #include "jhash.h"
 
 #include <libconfig.h>
@@ -62,6 +67,7 @@ void* ei_malloc (long size);
 #include "log.h"
 #include "capwap-dp.h"
 #include "netns.h"
+#include "dhcp_internal.h"
 
 #define API_VERSION      1
 
@@ -90,6 +96,7 @@ struct controller {
 	struct cds_list_head controllers;
 
 	int fd;
+	int dhcp_fd;
 	ErlConnect conp;
 
 	ev_io ev_read;
@@ -890,6 +897,87 @@ static void erl_get_stats(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 	ei_x_encode_empty_list(x_out);
 }
 
+static void erl_send_dhcp_packet(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
+{
+	struct dhcp_packet *bin;
+	long bin_len;
+	struct sockaddr_in daddr;
+
+    debug("Receive dhcp packet");
+    if (arity != 2) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+    }
+
+	if (ei_decode_binary(x_in->buff, &x_in->index, NULL, &bin_len) != 0) {
+		ei_x_encode_atom(x_out, "badarg");
+		return;
+    }
+    bin = (struct dhcp_packet*)(x_in->buff + x_in->index - bin_len);
+    debug(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>");
+    hexdump(bin, bin_len);
+    char str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &(bin->yiaddr), str, INET_ADDRSTRLEN);
+    debug("y======================: %s", str);
+    inet_ntop(AF_INET, &(bin->giaddr), str, INET_ADDRSTRLEN);
+    debug("my======================: %s", str);
+
+    if (bin->op == BOOTREPLY) {
+    // Msg from client
+
+    if (bin->flags & F_BROADCAST) {
+        debug("broadcast answer");
+
+		/* struct in_pktinfo *pkt; */
+
+		/* msg.msg_control = cbuf; */
+		/* msg.msg_controllen = sizeof(cbuf); */
+
+		/* cmsg = CMSG_FIRSTHDR(&msg); */
+
+		/* pkt = (struct in_pktinfo *)CMSG_DATA(cmsg); */
+		/* pkt->ipi_ifindex = if_idx; */
+		/* pkt->ipi_spec_dst.s_addr = INADDR_ANY; */
+
+		/* msg.msg_controllen = cmsg->cmsg_len = CMSG_LEN(sizeof(struct in_pktinfo)); */
+
+		/* cmsg->cmsg_level = SOL_IP; */
+		/* cmsg->cmsg_type = IP_PKTINFO; */
+		/* daddr.sin_port = htons(68); */
+		/* daddr.sin_addr.s_addr = INADDR_BROADCAST; */
+    } else {
+		debug("unicast answer");
+
+        debug("Send offer to iface %s", tap_dev);
+
+        daddr.sin_port = htons(68);
+        daddr.sin_addr = bin->yiaddr;
+
+        /* unicast to unconfigured client
+         * inject MAC address direct into ARP cache */
+        struct arpreq arp;
+        *((struct sockaddr_in *)&arp.arp_pa) = daddr;
+        daddr.sin_family = AF_INET;
+
+        arp.arp_ha.sa_family = bin->htype;
+        /* arp.arp_ha.sa_family = AF_UNSPEC; */
+        memcpy(arp.arp_ha.sa_data, bin->chaddr, bin->hlen);
+        strncpy(arp.arp_dev, tap_dev, IFNAMSIZ);
+        arp.arp_flags = ATF_COM;
+        ssize_t r __attribute__((unused));
+
+        r = ioctl(workers[send_worker].dhcp_fd, SIOCSARP, &arp);
+        debug("arp result: %zd", r);
+
+
+        r = sendto(workers[send_worker].dhcp_fd, bin, bin_len, 0, &daddr, sizeof(daddr));
+        debug("offer sendto: %zd", r);
+    }
+    }
+
+	ei_x_encode_atom(x_out, "ok");
+}
+
 static void handle_gen_call_capwap(struct controller *cnt, const char *fn, int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 {
 	if (strncmp(fn, "sendto", 6) == 0) {
@@ -936,6 +1024,9 @@ static void handle_gen_call_capwap(struct controller *cnt, const char *fn, int a
 	}
 	else if (strncmp(fn, "get_stats", 9) == 0) {
 		erl_get_stats(arity, x_in, x_out);
+	}
+	else if (strncmp(fn, "send_dhcp_packet", 16) == 0) {
+		erl_send_dhcp_packet(arity, x_in, x_out);
 	}
 	else
 		ei_x_encode_atom(x_out, "error");
@@ -1218,7 +1309,21 @@ void capwap_in(const struct sockaddr *addr,
 	ei_x_encode_tuple_header(&x, 3);
 	ei_x_encode_atom(&x, "capwap_in");
 	ei_x_encode_sockaddr(&x, addr);
-	hexdump(buf, len);
+	/* hexdump(buf, len); */
+	ei_x_encode_binary(&x, (void *)buf, len);
+
+	control_enqueue(&x);
+}
+
+void dhcp_in(unsigned char *buf, ssize_t len)
+{
+	ei_x_buff x;
+
+	/* prealloc enough space to hold the data plus the Erlang encoded meta data */
+	ei_x_new_size(&x, 48 + len);
+	ei_x_encode_version(&x);
+	ei_x_encode_tuple_header(&x, 2);
+	ei_x_encode_atom(&x, "dhcp_in");
 	ei_x_encode_binary(&x, (void *)buf, len);
 
 	control_enqueue(&x);
@@ -1379,7 +1484,7 @@ int main(int argc, char *argv[])
 	};
 
 	int on = 1;
-	int cfg_num_workers = 8;
+	int cfg_num_workers = 1;
 
 	char *config_file = SYSCONFDIR "/capwap-dp.conf";
 

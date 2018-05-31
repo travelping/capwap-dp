@@ -22,6 +22,7 @@
 #include <net/ethernet.h>
 #include <urcu/rcuhlist.h>      /* RCU hlist */
 #include <urcu/rculfhash.h>	/* RCU Lock-free hash table */
+#include "common.h"
 
 /* global setting, cmdline arguments */
 
@@ -134,8 +135,11 @@ struct worker {
 	struct ev_loop *loop;
 	pthread_mutex_t loop_lock; /* global loop lock */
 
+	char tap_dev[IFNAMSIZ];
+
 	ev_io tap_ev;
 	ev_io capwap_ev;
+	ev_io dhcp_ev;
 	ev_async stop_ev;
 
 	unsigned int id;
@@ -143,6 +147,7 @@ struct worker {
 
 	int tap_fd;
 	int capwap_fd;
+    int dhcp_fd;
 
 	struct ratelimit unknown_wtp_limit;
 
@@ -169,12 +174,14 @@ extern struct worker *workers;
 
 extern struct cds_lfht *ht_stations;	/* Hash table */
 extern struct cds_lfht *ht_clients;	/* Hash table */
+extern char *tap_dev;
 
 #define SIN_ADDR_PTR(addr) ((((struct sockaddr *)(addr))->sa_family == AF_INET) ? (void *)&(((struct sockaddr_in *)(addr))->sin_addr) : (void *)&(((struct sockaddr_in6 *)(addr))->sin6_addr))
 #define SIN_PORT(addr) ((((struct sockaddr *)(addr))->sa_family == AF_INET) ? (((struct sockaddr_in *)(addr))->sin_port) : (((struct sockaddr_in6 *)(addr))->sin6_port))
 
 void packet_in_tap(uint16_t vlan, const unsigned char *, ssize_t);
 void capwap_in(const struct sockaddr *, const unsigned char *, unsigned int, const unsigned char *, ssize_t);
+void dhcp_in(unsigned char *, ssize_t);
 
 int start_worker(size_t);
 unsigned long hash_sockaddr(const struct sockaddr *);

@@ -47,6 +47,8 @@
 
 #define DHCP_MAX_REPLY_LEN   1500
 
+#define F_BROADCAST      (1 << 2)
+
 struct dhcp_packet {
 	uint8_t op;
 	uint8_t htype;

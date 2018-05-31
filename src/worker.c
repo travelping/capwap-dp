@@ -72,12 +72,14 @@
 
 int num_workers;
 struct worker *workers;
+char *tap_dev;
 
 struct cds_lfht *ht_stations;	/* Hash table */
 struct cds_lfht *ht_clients;	/* Hash table */
 
 static int capwap_ns_fd = 0;
 static int fwd_ns_fd = 0;
+static int dhcp_ns_fd = 0;
 
 static unsigned long get_ts()
 {
@@ -853,6 +855,48 @@ out_unlock:
 	rcu_read_unlock();
 }
 
+static int validate_pkt(struct dhcp_packet *pkt, size_t pkt_len)
+{
+	if (pkt_len < sizeof(struct dhcp_packet))
+		return 0;
+
+	if (pkt->op != BOOTREQUEST)
+		return 0;
+
+	if (pkt->htype != 1 && pkt->hlen != 6)
+		/* only Ethernet is supported */
+		return 0;
+
+	return 1;
+}
+
+static void dhcp_recv(struct worker *w, struct msghdr *msg,
+        unsigned char *buffer, unsigned int len)
+{
+	char ipaddr[INET6_ADDRSTRLEN] __attribute__((unused));
+	const struct sockaddr *addr = (struct sockaddr *)msg->msg_name;
+
+#if defined(DEBUG)
+	inet_ntop(addr->sa_family, SIN_ADDR_PTR(addr), ipaddr, sizeof(ipaddr));
+	debug("read %d bytes from %s:%d",
+	      len, ipaddr, ntohs(SIN_PORT(addr)));
+#endif
+
+	rcu_read_lock();
+
+	uatomic_inc(&w->rcvd_pkts);
+	uatomic_add(&w->rcvd_bytes, len);
+
+    if (!validate_pkt((struct dhcp_packet *)buffer, len)) {
+		goto out_unlock;
+	}
+
+    dhcp_in(buffer, len);
+
+out_unlock:
+	rcu_read_unlock();
+}
+
 static void wtp_update_mtu(struct sockaddr *addr, int mtu)
 {
 	struct client *wtp;
@@ -1053,6 +1097,42 @@ static void capwap_cb(EV_P_ ev_io *ev, int revents)
 		capwap_recv(w, &msgs[i].msg_hdr, bufs[i], msgs[i].msg_len);
 	}
 
+#undef VLEN
+#undef BUFSIZE
+}
+
+static void dhcpsrv_ev_cb(EV_P_ ev_io *ev, int revents)
+{
+	int i;
+	ssize_t r;
+#define VLEN 16
+#define BUFSIZE 2048
+
+	struct mmsghdr msgs[VLEN];
+	struct sockaddr_storage addrs[VLEN];
+	struct iovec iovecs[VLEN];
+	unsigned char bufs[VLEN][BUFSIZE];
+
+	struct worker *w = ev_userdata (EV_A);
+
+	memset(msgs, 0, sizeof(msgs));
+	for (i = 0; i < VLEN; i++) {
+		msgs[i].msg_hdr.msg_name    = &addrs[i];
+		msgs[i].msg_hdr.msg_namelen = sizeof(struct sockaddr_storage);
+		iovecs[i].iov_base          = bufs[i];
+		iovecs[i].iov_len           = BUFSIZE;
+		msgs[i].msg_hdr.msg_iov     = &iovecs[i];
+		msgs[i].msg_hdr.msg_iovlen  = 1;
+	}
+
+	r = recvmmsg(ev->fd, msgs, VLEN, MSG_DONTWAIT, NULL);
+
+	debug("%zd dhcp messages received", r);
+	for (i = 0; i < r; i++) {
+		debug("flags: %d", msgs[i].msg_hdr.msg_flags);
+		debug("received dhcp size %d", msgs[i].msg_len);
+		dhcp_recv(w, &msgs[i].msg_hdr, bufs[i], msgs[i].msg_len);
+	}
 #undef VLEN
 #undef BUFSIZE
 }
@@ -1531,7 +1611,7 @@ static void tap_cb(EV_P_ ev_io *ev, int revents)
 		uint16_t vlan;
 
 		debug("read %zd bytes", r);
-//		hexdump(buffer, r);
+		hexdump(buffer, r);
 
 		vlan = strip_vlan_tag(&buf, &r);
 
@@ -1606,11 +1686,14 @@ static void *worker_thread(void *arg)
 {
 	int on = 1;
 	int domain;
+	int mtu = IP_PMTUDISC_DONT;
+    int opt = 1;
 
 	struct sockaddr_storage saddr;
 	ssize_t saddr_len;
 	struct worker *w = (struct worker *)arg;
 
+    struct ifreq ifr;
 	/*
 	 * Each thread need using RCU read-side need to be explicitly
 	 * registered.
@@ -1646,6 +1729,7 @@ static void *worker_thread(void *arg)
 		exit(EXIT_FAILURE);
 	}
 
+
 	setsockopt(w->capwap_fd, SOL_SOCKET, SO_REUSEADDR, (char*)&on, sizeof(on));
 #if !defined(SO_REUSEPORT)
 #       warning "SO_REUSEPORT undefined, please upgrade to a newer kernel"
@@ -1664,10 +1748,54 @@ static void *worker_thread(void *arg)
 		exit(EXIT_FAILURE);
 	}
 
+    //DHCP processed
+
+    if (dhcp_ns_fd) {
+        w->dhcp_fd = socket_ns(dhcp_ns_fd, PF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    } else {
+        w->dhcp_fd = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    }
+
+	if (w->dhcp_fd < 0) {
+		perror("socket dhcp");
+        exit(EXIT_FAILURE);
+	}
+
+	fcntl(w->dhcp_fd, F_SETFD, FD_CLOEXEC | fcntl(w->dhcp_fd, F_GETFD));
+	fcntl(w->dhcp_fd, F_SETFL, O_NONBLOCK);
+
+    memset(&ifr, 0, sizeof(ifr));
+    debug("bind dhcp socket to %s", tap_dev);
+    strncpy(ifr.ifr_name, tap_dev, IFNAMSIZ);
+
+	setsockopt(w->dhcp_fd, SOL_SOCKET, SO_BINDTODEVICE, &ifr, sizeof(ifr));
+	setsockopt(w->dhcp_fd, SOL_IP, IP_MTU_DISCOVER, &mtu, sizeof(mtu));
+	setsockopt(w->dhcp_fd, SOL_IP, IP_PKTINFO, &opt, sizeof(opt));
+	setsockopt(w->dhcp_fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
+	setsockopt(w->dhcp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+
+    struct sockaddr_in dhcp_addr;
+
+	memset(&dhcp_addr, 0, sizeof(dhcp_addr));
+	dhcp_addr.sin_family = AF_INET;
+	dhcp_addr.sin_port = htons(DHCP_SERVER_PORT);
+	dhcp_addr.sin_addr.s_addr = INADDR_ANY;
+
+	if (bind(w->dhcp_fd, (struct sockaddr *)&dhcp_addr, saddr_len) < 0) {
+            close(w->dhcp_fd);
+            exit(EXIT_FAILURE);
+	}
+
+    // end dhcp
+
 	w->loop = ev_loop_new(EVFLAG_AUTO);
 
 	ev_async_init(&w->stop_ev, stop_cb);
 	ev_async_start(w->loop, &w->stop_ev);
+
+	ev_io_init(&w->dhcp_ev, dhcpsrv_ev_cb, w->dhcp_fd, EV_READ);
+	ev_io_start(w->loop, &w->dhcp_ev);
 
 	ev_io_init(&w->capwap_ev, capwap_cb, w->capwap_fd, EV_READ);
 	ev_io_start(w->loop, &w->capwap_ev);
@@ -1699,7 +1827,7 @@ static void *worker_thread(void *arg)
 
 int start_worker(size_t count)
 {
-	char tap_dev[IFNAMSIZ] = "\0";
+    tap_dev = (char *)calloc(IFNAMSIZ, sizeof(char));
 
 	if (!(workers = calloc(count, sizeof(struct worker))))
 		return 0;
@@ -1726,6 +1854,10 @@ int start_worker(size_t count)
 
 		if ((workers[i].tap_fd = tap_alloc(tap_dev)) < 0)
 			return 0;
+
+        debug("Tap device %s", tap_dev);
+        strncpy(workers[i].tap_dev, tap_dev, IFNAMSIZ);
+        debug("Tap device111 %s", workers[i].tap_dev);
 		pthread_create(&workers[i].tid, NULL, worker_thread, (void *)&workers[i]);
 	}
 
