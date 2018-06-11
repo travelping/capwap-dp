@@ -873,9 +873,9 @@ static void dhcp_recv(struct worker *w, struct msghdr *msg,
         unsigned char *buffer, unsigned int len)
 {
 	char ipaddr[INET6_ADDRSTRLEN] __attribute__((unused));
-	const struct sockaddr *addr = (struct sockaddr *)msg->msg_name;
 
 #if defined(DEBUG)
+	const struct sockaddr *addr = (struct sockaddr *)msg->msg_name;
 	inet_ntop(addr->sa_family, SIN_ADDR_PTR(addr), ipaddr, sizeof(ipaddr));
 	debug("read %d bytes from %s:%d",
 	      len, ipaddr, ntohs(SIN_PORT(addr)));
@@ -913,10 +913,10 @@ static void wtp_update_mtu(struct sockaddr *addr, int mtu)
 static void handle_icmp_error(struct sock_extended_err *sock_err,
 			      struct sockaddr *remote)
 {
-	struct sockaddr *addr = SO_EE_OFFENDER(sock_err);
 	char ipaddr[INET6_ADDRSTRLEN] __attribute__((unused));
 
 #if defined(DEBUG)
+	struct sockaddr *addr = SO_EE_OFFENDER(sock_err);
 	inet_ntop(addr->sa_family, SIN_ADDR_PTR(addr), ipaddr, sizeof(ipaddr));
 	debug("ICMP Offender IP: %s:%d", ipaddr, ntohs(SIN_PORT(addr)));
 

@@ -199,7 +199,6 @@ int __delete_station(struct station *sta);
 int __delete_wtp(struct client *wtp);
 
 void capwap_socket_error(int origin, int type, const struct sockaddr *addr);
-
 /**
  * CAPWAP Transport Header
  *

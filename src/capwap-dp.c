@@ -43,12 +43,15 @@
 #include <sys/types.h>
 #include <ifaddrs.h>
 
-#include <urcu.h>               /* RCU flavor */
+#include <urcu.h>            /* RCU flavor */
 #include <urcu/uatomic.h>
-#include <urcu/ref.h>		/* ref counting */
-#include <urcu/rculist.h>       /* RCU list */
-#include <urcu/rculfqueue.h>    /* RCU Lock-free queue */
-#include <urcu/rculfhash.h>	/* RCU Lock-free hash table */
+#include <urcu/ref.h>		 /* ref counting */
+#include <urcu/rculist.h>    /* RCU list */
+#include <urcu/rculfqueue.h> /* RCU Lock-free queue */
+#include <urcu/rculfhash.h>	 /* RCU Lock-free hash table */
+#include <net/ethernet.h>
+#include <netinet/ip.h>
+#include <netinet/udp.h>
 
 #include "jhash.h"
 
@@ -68,6 +71,7 @@ void* ei_malloc (long size);
 #include "capwap-dp.h"
 #include "netns.h"
 #include "dhcp_internal.h"
+#include "ieee8023.h"
 
 #define API_VERSION      1
 
@@ -106,6 +110,18 @@ struct controller {
 
 	ei_x_buff x_in;
 	ei_x_buff x_out;
+};
+
+/* 
+    96 bit (12 bytes) pseudo header needed for udp header checksum calculation 
+*/
+struct udp_pheader
+{
+    u_int32_t source_address;
+    u_int32_t dest_address;
+    u_int8_t placeholder;
+    u_int8_t protocol;
+    u_int16_t udp_length;
 };
 
 CDS_LIST_HEAD(controllers);
@@ -897,11 +913,96 @@ static void erl_get_stats(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 	ei_x_encode_empty_list(x_out);
 }
 
+unsigned short csum(unsigned short *ptr,int nbytes)
+{
+    register long sum = 0;
+    unsigned short oddbyte;
+
+    while(nbytes > 1) {
+        sum += *ptr++;
+        nbytes -= 2;
+    }
+
+    if(nbytes == 1) {
+        oddbyte = 0;
+        *((u_char*)&oddbyte) = *(u_char*)ptr;
+        sum += oddbyte;
+    }
+
+    sum = (sum >> 16) + (sum & 0xffff);
+    sum = sum + (sum >> 16);
+
+    return ~sum;
+}
+
+static struct iphdr* fill_raw_udp_packet(char *send_data, size_t data_len,
+        size_t* len)
+{
+    char datagram[4096], source_ip[32], *data, *pseudogram;
+    struct iphdr *iph = (struct iphdr *) (datagram + sizeof(struct ether_header));
+    //UDP header
+    struct udphdr *udph = (struct udphdr *) (datagram +
+            sizeof (struct iphdr) + sizeof(struct ether_header));
+
+    // zero out the packet buffer
+    // NOTE: all size for packet
+    memset(datagram, 0, 4096);
+
+    data = datagram + sizeof(struct iphdr) + sizeof(struct udphdr);
+    strncpy(data, send_data, data_len);
+
+    // IP Header
+    iph->ihl = 5;
+    iph->version = 4;
+    iph->tos = 0;
+    iph->tot_len = sizeof (struct iphdr) + sizeof (struct udphdr) + strlen(data);
+    iph->id = htonl(54321); //Id of this packet
+    iph->frag_off = 0;
+    iph->ttl = 255;
+    iph->protocol = IPPROTO_UDP;
+    iph->check = 0;      //Set to 0 before calculating checksum
+    // Source ip
+    iph->saddr = inet_addr ( source_ip );    //Spoof the source ip address
+    // Dest ip
+    iph->daddr = sin.sin_addr.s_addr;
+
+    //Ip checksum
+    iph->check = csum ((unsigned short *) datagram, iph->tot_len);
+
+    //UDP header
+    udph->source = htons (6666);
+    udph->dest = htons (8622);
+    udph->len = htons(8 + strlen(data)); //tcp header size
+    udph->check = 0; //leave checksum 0 now, filled later by pseudo header
+
+    //Now the UDP checksum using the pseudo header
+    psh.source_address = inet_addr( source_ip );
+    psh.dest_address = sin.sin_addr.s_addr;
+    psh.placeholder = 0;
+    psh.protocol = IPPROTO_UDP;
+    psh.udp_length = htons(sizeof(struct udphdr) + strlen(data) );
+
+    int psize = sizeof(struct udp_pheader) + sizeof(struct udphdr) + strlen(data);
+    pseudogram = malloc(psize);
+
+    memcpy(pseudogram , (char*) &psh, sizeof (struct udp_pheader));
+    memcpy(pseudogram + sizeof(struct udp_pheader), udph,
+            sizeof(struct udphdr) + strlen(data));
+
+    udph->check = csum( (unsigned short*) pseudogram , psize);
+
+	// Packet data
+    //
+    free(pseudogram);
+
+    return iph;
+}
+
 static void erl_send_dhcp_packet(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 {
 	struct dhcp_packet *bin;
 	long bin_len;
-	struct sockaddr_in daddr;
+	/* struct sockaddr_in daddr; */
 
     debug("Receive dhcp packet");
     if (arity != 2) {
@@ -950,28 +1051,36 @@ static void erl_send_dhcp_packet(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 
         debug("Send offer to iface %s", tap_dev);
 
-        daddr.sin_port = htons(68);
-        daddr.sin_addr = bin->yiaddr;
+        /* daddr.sin_port = htons(68); */
+        /* daddr.sin_addr = bin->yiaddr; */
 
-        /* unicast to unconfigured client
-         * inject MAC address direct into ARP cache */
-        struct arpreq arp;
-        *((struct sockaddr_in *)&arp.arp_pa) = daddr;
-        daddr.sin_family = AF_INET;
+        /* /1* unicast to unconfigured client */
+        /*  * inject MAC address direct into ARP cache *1/ */
+        /* struct arpreq arp; */
+        /* *((struct sockaddr_in *)&arp.arp_pa) = daddr; */
+        /* daddr.sin_family = AF_INET; */
 
-        arp.arp_ha.sa_family = bin->htype;
-        /* arp.arp_ha.sa_family = AF_UNSPEC; */
-        memcpy(arp.arp_ha.sa_data, bin->chaddr, bin->hlen);
-        strncpy(arp.arp_dev, tap_dev, IFNAMSIZ);
-        arp.arp_flags = ATF_COM;
-        ssize_t r __attribute__((unused));
+        /* arp.arp_ha.sa_family = bin->htype; */
+        /* /1* arp.arp_ha.sa_family = AF_UNSPEC; *1/ */
+        /* memcpy(arp.arp_ha.sa_data, bin->chaddr, bin->hlen); */
+        /* strncpy(arp.arp_dev, tap_dev, IFNAMSIZ); */
+        /* arp.arp_flags = ATF_COM; */
+        /* ssize_t r __attribute__((unused)); */
 
-        r = ioctl(workers[send_worker].dhcp_fd, SIOCSARP, &arp);
-        debug("arp result: %zd", r);
+        /* r = ioctl(workers[send_worker].dhcp_fd, SIOCSARP, &arp); */
+        /* debug("arp result: %zd", r); */
 
 
-        r = sendto(workers[send_worker].dhcp_fd, bin, bin_len, 0, &daddr, sizeof(daddr));
-        debug("offer sendto: %zd", r);
+        /* r = sendto(workers[send_worker].dhcp_fd, bin, bin_len, 0, &daddr, sizeof(daddr)); */
+        /* debug("offer sendto: %zd", r); */
+
+        /*mac */
+        /* bin->chaddr */
+        struct iphdr *iph;
+        size_t send_len;
+        iph = fill_raw_udp_packet(bin, bin_len, &send_len);
+        ieee8023_to_sta(&workers[send_worker], "9c:a9:e4:12:7d:b3", 0,
+                (const unsigned char *)iph, send_len);
     }
     }
 
