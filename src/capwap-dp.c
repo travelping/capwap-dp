@@ -913,7 +913,7 @@ static void erl_get_stats(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 	ei_x_encode_empty_list(x_out);
 }
 
-unsigned short csum(unsigned short *ptr,int nbytes)
+static unsigned short csum(unsigned short *ptr,int nbytes)
 {
     register long sum = 0;
     unsigned short oddbyte;
@@ -935,18 +935,21 @@ unsigned short csum(unsigned short *ptr,int nbytes)
     return ~sum;
 }
 
-static struct iphdr* fill_raw_udp_packet(char *send_data, size_t data_len,
-        size_t* len)
+static struct iphdr* fill_raw_udp_packet(void *send_data, size_t data_len,
+        struct in_addr daddr)
 {
-    char datagram[4096], source_ip[32], *data, *pseudogram;
-    struct iphdr *iph = (struct iphdr *) (datagram + sizeof(struct ether_header));
+    char *datagram, *data, *pseudogram;
+    size_t tot_len = data_len + sizeof(struct iphdr) + sizeof(struct udphdr);
+    datagram = (char *) malloc(tot_len);
+    struct udp_pheader psh;
+
+    struct iphdr *iph = (struct iphdr *) datagram;
     //UDP header
-    struct udphdr *udph = (struct udphdr *) (datagram +
-            sizeof (struct iphdr) + sizeof(struct ether_header));
+    struct udphdr *udph = (struct udphdr *) (datagram + sizeof (struct iphdr));
 
     // zero out the packet buffer
     // NOTE: all size for packet
-    memset(datagram, 0, 4096);
+    memset(datagram, 0, tot_len);
 
     data = datagram + sizeof(struct iphdr) + sizeof(struct udphdr);
     strncpy(data, send_data, data_len);
@@ -955,44 +958,41 @@ static struct iphdr* fill_raw_udp_packet(char *send_data, size_t data_len,
     iph->ihl = 5;
     iph->version = 4;
     iph->tos = 0;
-    iph->tot_len = sizeof (struct iphdr) + sizeof (struct udphdr) + strlen(data);
-    iph->id = htonl(54321); //Id of this packet
+    iph->tot_len = tot_len;
+    iph->id = htons(54321); // Id ip packet
     iph->frag_off = 0;
     iph->ttl = 255;
     iph->protocol = IPPROTO_UDP;
-    iph->check = 0;      //Set to 0 before calculating checksum
+    iph->check = 0; // Set to 0 before calculating checksum
     // Source ip
-    iph->saddr = inet_addr ( source_ip );    //Spoof the source ip address
+    iph->saddr = inet_addr ( "192.168.86.10" ); // Spoof the source ip address
     // Dest ip
-    iph->daddr = sin.sin_addr.s_addr;
+    iph->daddr = daddr.s_addr;
 
-    //Ip checksum
-    iph->check = csum ((unsigned short *) datagram, iph->tot_len);
+    // Ip checksum
+    iph->check = csum((unsigned short *)datagram, tot_len);
 
     //UDP header
-    udph->source = htons (6666);
-    udph->dest = htons (8622);
-    udph->len = htons(8 + strlen(data)); //tcp header size
+    udph->source = htons (67);
+    udph->dest = htons (68);
+    udph->len = htons(8 + data_len); //tcp header size
     udph->check = 0; //leave checksum 0 now, filled later by pseudo header
 
     //Now the UDP checksum using the pseudo header
-    psh.source_address = inet_addr( source_ip );
-    psh.dest_address = sin.sin_addr.s_addr;
+    psh.source_address = inet_addr( "192.168.86.10" );
+    psh.dest_address = daddr.s_addr;
     psh.placeholder = 0;
     psh.protocol = IPPROTO_UDP;
-    psh.udp_length = htons(sizeof(struct udphdr) + strlen(data) );
+    psh.udp_length = htons(sizeof(struct udphdr) + data_len);
 
-    int psize = sizeof(struct udp_pheader) + sizeof(struct udphdr) + strlen(data);
+    int psize = sizeof(struct udp_pheader) + sizeof(struct udphdr) + data_len;
     pseudogram = malloc(psize);
-
-    memcpy(pseudogram , (char*) &psh, sizeof (struct udp_pheader));
+    memcpy(pseudogram, (char*) &psh, sizeof (struct udp_pheader));
     memcpy(pseudogram + sizeof(struct udp_pheader), udph,
-            sizeof(struct udphdr) + strlen(data));
+            sizeof(struct udphdr) + data_len);
 
-    udph->check = csum( (unsigned short*) pseudogram , psize);
+    udph->check = csum( (unsigned short*) pseudogram, psize);
 
-	// Packet data
-    //
     free(pseudogram);
 
     return iph;
@@ -1051,36 +1051,14 @@ static void erl_send_dhcp_packet(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 
         debug("Send offer to iface %s", tap_dev);
 
-        /* daddr.sin_port = htons(68); */
-        /* daddr.sin_addr = bin->yiaddr; */
-
-        /* /1* unicast to unconfigured client */
-        /*  * inject MAC address direct into ARP cache *1/ */
-        /* struct arpreq arp; */
-        /* *((struct sockaddr_in *)&arp.arp_pa) = daddr; */
-        /* daddr.sin_family = AF_INET; */
-
-        /* arp.arp_ha.sa_family = bin->htype; */
-        /* /1* arp.arp_ha.sa_family = AF_UNSPEC; *1/ */
-        /* memcpy(arp.arp_ha.sa_data, bin->chaddr, bin->hlen); */
-        /* strncpy(arp.arp_dev, tap_dev, IFNAMSIZ); */
-        /* arp.arp_flags = ATF_COM; */
-        /* ssize_t r __attribute__((unused)); */
-
-        /* r = ioctl(workers[send_worker].dhcp_fd, SIOCSARP, &arp); */
-        /* debug("arp result: %zd", r); */
-
-
-        /* r = sendto(workers[send_worker].dhcp_fd, bin, bin_len, 0, &daddr, sizeof(daddr)); */
-        /* debug("offer sendto: %zd", r); */
-
-        /*mac */
-        /* bin->chaddr */
+        static char mac[18] = { '\0' };
+        snprintf(mac, 18, PRIsMAC, ARGsMAC(bin->chaddr));
+        debug("DHCP: Op: %d, HType: %d, HLen: %d, CHADDR: %s", bin->op, bin->htype, bin->hlen, mac);
         struct iphdr *iph;
-        size_t send_len;
-        iph = fill_raw_udp_packet(bin, bin_len, &send_len);
-        ieee8023_to_sta(&workers[send_worker], "9c:a9:e4:12:7d:b3", 0,
-                (const unsigned char *)iph, send_len);
+        iph = fill_raw_udp_packet(bin, bin_len, bin->yiaddr);
+        ieee8023_to_sta(&workers[send_worker], mac, 0,
+                (const unsigned char *)iph, iph->tot_len);
+        free(iph);
     }
     }
 
@@ -1089,6 +1067,7 @@ static void erl_send_dhcp_packet(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 
 static void handle_gen_call_capwap(struct controller *cnt, const char *fn, int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 {
+    debug("Handle erl func %s", fn);
 	if (strncmp(fn, "sendto", 6) == 0) {
 		erl_send_to(arity, x_in, x_out);
 	}
