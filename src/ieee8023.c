@@ -218,11 +218,16 @@ int ieee8023_to_sta(struct worker *w, const unsigned char *mac, uint16_t vlan,
 	rcu_read_lock();
 
 	sta = find_station(mac);
-	if (!sta)
-		goto out_unlock;
 
-	if (VLAN_ID(sta->vlan) != VLAN_ID(vlan))
+	if (!sta) {
 		goto out_unlock;
+    }
+
+    if (vlan != VLAN_PASS) {
+        if (VLAN_ID(sta->vlan) != VLAN_ID(vlan)) {
+            goto out_unlock;
+        }
+    }
 
 	wtp = rcu_dereference(sta->wtp);
 	if (wtp) {

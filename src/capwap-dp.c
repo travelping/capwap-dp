@@ -49,6 +49,7 @@
 #include <urcu/rculist.h>    /* RCU list */
 #include <urcu/rculfqueue.h> /* RCU Lock-free queue */
 #include <urcu/rculfhash.h>	 /* RCU Lock-free hash table */
+#include <net/if.h>
 #include <net/ethernet.h>
 #include <netinet/ip.h>
 #include <netinet/udp.h>
@@ -913,7 +914,7 @@ static void erl_get_stats(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 	ei_x_encode_empty_list(x_out);
 }
 
-static unsigned short csum(unsigned short *ptr,int nbytes)
+static unsigned short csum(unsigned short *ptr, int nbytes)
 {
     register long sum = 0;
     unsigned short oddbyte;
@@ -935,48 +936,61 @@ static unsigned short csum(unsigned short *ptr,int nbytes)
     return ~sum;
 }
 
-static struct iphdr* fill_raw_udp_packet(void *send_data, size_t data_len,
-        struct in_addr daddr)
+static struct ether_header* fill_raw_udp_packet(void *send_data,
+        uint16_t data_len, struct in_addr daddr, uint8_t *mac_dhost, uint16_t *send_len)
 {
     char *datagram, *data, *pseudogram;
-    size_t tot_len = data_len + sizeof(struct iphdr) + sizeof(struct udphdr);
-    datagram = (char *) malloc(tot_len);
+    uint16_t ip_tot_len, tot_len;
+    struct ifreq if_mac;
+
+    ip_tot_len = data_len + sizeof(struct iphdr) + sizeof(struct udphdr);
+    tot_len = ip_tot_len + sizeof(struct ether_header);
+    *send_len = tot_len;
+
+    datagram = (char *) calloc(1, tot_len);
+
     struct udp_pheader psh;
 
-    struct iphdr *iph = (struct iphdr *) datagram;
-    //UDP header
-    struct udphdr *udph = (struct udphdr *) (datagram + sizeof (struct iphdr));
+    struct ether_header *eh = (struct ether_header *) datagram;
 
-    // zero out the packet buffer
-    // NOTE: all size for packet
-    memset(datagram, 0, tot_len);
+    struct iphdr *iph = (struct iphdr *) (datagram +
+            sizeof(struct ether_header));
+    struct udphdr *udph = (struct udphdr *) (datagram +
+            sizeof(struct ether_header) + sizeof(struct iphdr));
 
-    data = datagram + sizeof(struct iphdr) + sizeof(struct udphdr);
-    strncpy(data, send_data, data_len);
+    data = datagram + sizeof(struct ether_header) + sizeof(struct iphdr) +
+        sizeof(struct udphdr);
+    memcpy(data, send_data, data_len);
+
+    // Ethernet frame
+    // Get the MAC address of the interface
+    memset(&if_mac, 0, sizeof(struct ifreq));
+    strncpy(if_mac.ifr_name, tap_dev, IFNAMSIZ);
+    if (ioctl(workers[send_worker].tap_fd, SIOCGIFHWADDR, &if_mac) < 0) {
+        perror("SIOCGIFHWADDR");
+    }
+    eh->ether_type = htons(ETH_P_IP);
+    memcpy(eh->ether_shost, if_mac.ifr_hwaddr.sa_data, 6);
+    memcpy(eh->ether_dhost, mac_dhost, 6);
+
 
     // IP Header
     iph->ihl = 5;
     iph->version = 4;
-    iph->tos = 0;
-    iph->tot_len = tot_len;
-    iph->id = htons(54321); // Id ip packet
-    iph->frag_off = 0;
+    iph->tot_len = htons(ip_tot_len);
+    iph->id = htons(0);
+    iph->frag_off = IP_DF;
     iph->ttl = 255;
     iph->protocol = IPPROTO_UDP;
-    iph->check = 0; // Set to 0 before calculating checksum
     // Source ip
     iph->saddr = inet_addr ( "192.168.86.10" ); // Spoof the source ip address
     // Dest ip
     iph->daddr = daddr.s_addr;
 
-    // Ip checksum
-    iph->check = csum((unsigned short *)datagram, tot_len);
-
     //UDP header
-    udph->source = htons (67);
-    udph->dest = htons (68);
-    udph->len = htons(8 + data_len); //tcp header size
-    udph->check = 0; //leave checksum 0 now, filled later by pseudo header
+    udph->source = htons(67);
+    udph->dest = htons(68);
+    udph->len = htons(sizeof(struct udphdr) + data_len);
 
     //Now the UDP checksum using the pseudo header
     psh.source_address = inet_addr( "192.168.86.10" );
@@ -991,11 +1005,15 @@ static struct iphdr* fill_raw_udp_packet(void *send_data, size_t data_len,
     memcpy(pseudogram + sizeof(struct udp_pheader), udph,
             sizeof(struct udphdr) + data_len);
 
+    // Udp checksum
     udph->check = csum( (unsigned short*) pseudogram, psize);
 
     free(pseudogram);
 
-    return iph;
+    // Ip checksum
+    iph->check = csum((unsigned short *)iph, iph->tot_len);
+
+    return eh;
 }
 
 static void erl_send_dhcp_packet(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
@@ -1051,14 +1069,12 @@ static void erl_send_dhcp_packet(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 
         debug("Send offer to iface %s", tap_dev);
 
-        static char mac[18] = { '\0' };
-        snprintf(mac, 18, PRIsMAC, ARGsMAC(bin->chaddr));
-        debug("DHCP: Op: %d, HType: %d, HLen: %d, CHADDR: %s", bin->op, bin->htype, bin->hlen, mac);
-        struct iphdr *iph;
-        iph = fill_raw_udp_packet(bin, bin_len, bin->yiaddr);
-        ieee8023_to_sta(&workers[send_worker], mac, 0,
-                (const unsigned char *)iph, iph->tot_len);
-        free(iph);
+        struct ether_header *packet;
+        uint16_t len = 0;
+        packet = fill_raw_udp_packet(bin, bin_len, bin->yiaddr, bin->chaddr, &len);
+        ieee8023_to_sta(&workers[send_worker], bin->chaddr, VLAN_PASS,
+                (const unsigned char *)packet, len);
+        free(packet);
     }
     }
 

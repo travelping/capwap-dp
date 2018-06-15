@@ -20,6 +20,7 @@
 #define __IEEE8023_H
 
 #define VLAN_ID(x)  ((x) & 0x0ffff)
+#define VLAN_PASS 0xffff
 
 int ieee8023_to_sta(struct worker *w, const unsigned char *mac, uint16_t vlan,
 			   const unsigned char *buffer, ssize_t len);
