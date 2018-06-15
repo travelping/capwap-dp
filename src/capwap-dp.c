@@ -914,26 +914,24 @@ static void erl_get_stats(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 	ei_x_encode_empty_list(x_out);
 }
 
-static unsigned short csum(unsigned short *ptr, int nbytes)
+static unsigned short csum(void *ptr, size_t count)
 {
-    register long sum = 0;
-    unsigned short oddbyte;
+    unsigned long sum = 0;
+    const uint16_t *ip1;
 
-    while(nbytes > 1) {
-        sum += *ptr++;
-        nbytes -= 2;
+    ip1 = ptr;
+    while (count > 1)
+    {
+        sum += *ip1++;
+        if (sum & 0x80000000)
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        count -= 2;
     }
 
-    if(nbytes == 1) {
-        oddbyte = 0;
-        *((u_char*)&oddbyte) = *(u_char*)ptr;
-        sum += oddbyte;
-    }
+    while (sum >> 16)
+        sum = (sum & 0xFFFF) + (sum >> 16);
 
-    sum = (sum >> 16) + (sum & 0xffff);
-    sum = sum + (sum >> 16);
-
-    return ~sum;
+    return (~sum);
 }
 
 static struct ether_header* fill_raw_udp_packet(void *send_data,
@@ -979,13 +977,16 @@ static struct ether_header* fill_raw_udp_packet(void *send_data,
     iph->version = 4;
     iph->tot_len = htons(ip_tot_len);
     iph->id = htons(0);
-    iph->frag_off = IP_DF;
+    iph->frag_off = 0;
     iph->ttl = 255;
     iph->protocol = IPPROTO_UDP;
     // Source ip
     iph->saddr = inet_addr ( "192.168.86.10" ); // Spoof the source ip address
     // Dest ip
     iph->daddr = daddr.s_addr;
+
+    // Ip checksum
+    iph->check = csum((unsigned short *)iph, sizeof(struct iphdr));
 
     //UDP header
     udph->source = htons(67);
@@ -1009,9 +1010,6 @@ static struct ether_header* fill_raw_udp_packet(void *send_data,
     udph->check = csum( (unsigned short*) pseudogram, psize);
 
     free(pseudogram);
-
-    // Ip checksum
-    iph->check = csum((unsigned short *)iph, iph->tot_len);
 
     return eh;
 }
