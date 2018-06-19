@@ -1018,9 +1018,6 @@ static void erl_send_dhcp_packet(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 {
 	struct dhcp_packet *bin;
 	long bin_len;
-	/* struct sockaddr_in daddr; */
-
-    debug("Receive dhcp packet");
     if (arity != 2) {
 		ei_x_encode_atom(x_out, "badarg");
 		return;
@@ -1031,13 +1028,6 @@ static void erl_send_dhcp_packet(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 		return;
     }
     bin = (struct dhcp_packet*)(x_in->buff + x_in->index - bin_len);
-    debug(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>");
-    hexdump(bin, bin_len);
-    char str[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &(bin->yiaddr), str, INET_ADDRSTRLEN);
-    debug("y======================: %s", str);
-    inet_ntop(AF_INET, &(bin->giaddr), str, INET_ADDRSTRLEN);
-    debug("my======================: %s", str);
 
     if (bin->op == BOOTREPLY) {
     // Msg from client
@@ -1063,10 +1053,6 @@ static void erl_send_dhcp_packet(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 		/* daddr.sin_port = htons(68); */
 		/* daddr.sin_addr.s_addr = INADDR_BROADCAST; */
     } else {
-		debug("unicast answer");
-
-        debug("Send offer to iface %s", tap_dev);
-
         struct ether_header *packet;
         uint16_t len = 0;
         packet = fill_raw_udp_packet(bin, bin_len, bin->yiaddr, bin->chaddr, &len);
@@ -1081,7 +1067,6 @@ static void erl_send_dhcp_packet(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 
 static void handle_gen_call_capwap(struct controller *cnt, const char *fn, int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 {
-    debug("Handle erl func %s", fn);
 	if (strncmp(fn, "sendto", 6) == 0) {
 		erl_send_to(arity, x_in, x_out);
 	}
