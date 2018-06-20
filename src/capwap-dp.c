@@ -1551,6 +1551,7 @@ static void usage(void)
 	       "  -n, --netns=NAMESPACE             open CAPWAP socket in namespace\n"
 	       "  -f, --forward-netns=NAMESPACE     create TAP interface in namespace\n"
 	       "  --honor-df                        send ICMP notice based on IP DF bit\n"
+           "  --dhcp-relay                      enable DHCP Relay on tap interface\n"
 	       "\n");
 
 	exit(EXIT_SUCCESS);
@@ -1562,6 +1563,7 @@ int capwap_port = 5247;
 const char *capwap_ns = NULL;
 const char *fwd_ns = NULL;
 int honor_df = 0;
+int dhcp_relay = 0;
 
 int unknown_wtp_limit_interval = 1000;
 int unknown_wtp_limit_bucket = 30;
@@ -1597,6 +1599,7 @@ int main(int argc, char *argv[])
 			{"sname",         1, 0, 1024},
 			{"name",          1, 0, 1025},
 			{"honor-df",      1, 0, 1026},
+			{"dhcp-relay",    0, 0, 1027},
 			{"v4only",        0, 0, '4'},
 			{"v6only",        0, 0, '6'},
 			{"forward-netns", 1, 0, 'f'},
@@ -1637,6 +1640,10 @@ int main(int argc, char *argv[])
 		case 1026:
 			honor_df = 1;
 			break;
+
+        case 1027:
+            dhcp_relay = 1;
+            break;
 
 		case '4':
 			if (v6only) {
@@ -1715,6 +1722,7 @@ int main(int argc, char *argv[])
 		config_lookup_int(&cfg, "capwap.ratelimit.unknown-wtp.bucket", &unknown_wtp_limit_bucket);
 
 		config_lookup_int(&cfg, "capwap.workers", &cfg_num_workers);
+		config_lookup_bool(&cfg, "dhcprelay.enable", &dhcp_relay);
 	} else {
 		fprintf(stderr, "can't open config file %s, running with default config\n", config_file);
 		log(LOG_WARNING, "can't open config file %s, running with default config", config_file);

@@ -32,6 +32,7 @@ extern int capwap_port;
 extern const char *capwap_ns;
 extern const char *fwd_ns;
 extern int honor_df;
+extern int dhcp_relay;
 
 extern int unknown_wtp_limit_interval;
 extern int unknown_wtp_limit_bucket;
@@ -134,8 +135,6 @@ struct wlan {
 struct worker {
 	struct ev_loop *loop;
 	pthread_mutex_t loop_lock; /* global loop lock */
-
-	char tap_dev[IFNAMSIZ];
 
 	ev_io tap_ev;
 	ev_io capwap_ev;
