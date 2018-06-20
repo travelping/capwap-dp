@@ -939,7 +939,7 @@ static struct ether_header* fill_raw_udp_packet(void *send_data,
 {
     char *datagram, *data, *pseudogram;
     uint16_t ip_tot_len, tot_len;
-    struct ifreq if_mac;
+    struct ifreq if_mac, if_ip;
 
     ip_tot_len = data_len + sizeof(struct iphdr) + sizeof(struct udphdr);
     tot_len = ip_tot_len + sizeof(struct ether_header);
@@ -961,7 +961,7 @@ static struct ether_header* fill_raw_udp_packet(void *send_data,
     memcpy(data, send_data, data_len);
 
     // Ethernet frame
-    // Get the MAC address of the interface
+    // Get the MAC address of the TAP interface
     memset(&if_mac, 0, sizeof(struct ifreq));
     strncpy(if_mac.ifr_name, tap_dev, IFNAMSIZ);
     if (ioctl(workers[send_worker].tap_fd, SIOCGIFHWADDR, &if_mac) < 0) {
@@ -973,6 +973,14 @@ static struct ether_header* fill_raw_udp_packet(void *send_data,
 
 
     // IP Header
+    // Get the IP address of the TAP interface
+    memset(&if_ip, 0, sizeof(struct ifreq));
+    strncpy(if_ip.ifr_name, tap_dev, IFNAMSIZ);
+    if (ioctl(workers[send_worker].tap_fd, SIOCGIFADDR, &if_ip) < 0) {
+        perror("SIOCGIFADDR");
+    }
+    char *tap_ip = inet_ntoa(( (struct sockaddr_in *)&if_ip.ifr_addr )->sin_addr);
+
     iph->ihl = 5;
     iph->version = 4;
     iph->tot_len = htons(ip_tot_len);
@@ -981,7 +989,7 @@ static struct ether_header* fill_raw_udp_packet(void *send_data,
     iph->ttl = 255;
     iph->protocol = IPPROTO_UDP;
     // Source ip
-    iph->saddr = inet_addr ( "192.168.86.10" ); // Spoof the source ip address
+    iph->saddr = inet_addr(tap_ip);
     // Dest ip
     iph->daddr = daddr.s_addr;
 
@@ -994,7 +1002,7 @@ static struct ether_header* fill_raw_udp_packet(void *send_data,
     udph->len = htons(sizeof(struct udphdr) + data_len);
 
     //Now the UDP checksum using the pseudo header
-    psh.source_address = inet_addr( "192.168.86.10" );
+    psh.source_address = iph->saddr;
     psh.dest_address = daddr.s_addr;
     psh.placeholder = 0;
     psh.protocol = IPPROTO_UDP;
