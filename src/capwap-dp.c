@@ -1037,9 +1037,6 @@ static void erl_send_dhcp_packet(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
     }
     bin = (struct dhcp_packet*)(x_in->buff + x_in->index - bin_len);
 
-    if (bin->op == BOOTREPLY) {
-    // Msg from client
-
     if (bin->flags & F_BROADCAST) {
         debug("broadcast answer");
 
@@ -1067,7 +1064,6 @@ static void erl_send_dhcp_packet(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
         ieee8023_to_sta(&workers[send_worker], bin->chaddr, VLAN_PASS,
                 (const unsigned char *)packet, len);
         free(packet);
-    }
     }
 
 	ei_x_encode_atom(x_out, "ok");
