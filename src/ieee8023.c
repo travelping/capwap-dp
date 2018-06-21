@@ -58,6 +58,18 @@ static const unsigned char icmp_pointers[] = {
 	[ICMP_ADDRESSREPLY] = 0
 };
 
+/* 
+    96 bit (12 bytes) pseudo header needed for udp header checksum calculation 
+*/
+struct udp_pheader
+{
+    u_int32_t source_address;
+    u_int32_t dest_address;
+    u_int8_t placeholder;
+    u_int8_t protocol;
+    u_int16_t udp_length;
+};
+
 static uint32_t cksum_part(uint8_t *ip, int len, uint32_t sum)
 {
 	while (len > 1) {
@@ -417,5 +429,74 @@ int ieee8023_to_wtp(struct worker *w, struct client *wtp, unsigned int rid,
 	}
 
 	return 1;
+}
+
+struct ether_header* fill_raw_udp_packet(void *data, uint16_t data_len,
+        struct in_addr *saddr, uint8_t *mac_shost,
+        struct in_addr *daddr, uint8_t *mac_dhost, uint16_t *send_len)
+{
+    uint8_t *datagram, *data_buf;
+    uint16_t ip_tot_len, tot_len;
+    uint32_t udp_csum;
+
+    ip_tot_len = data_len + sizeof(struct iphdr) + sizeof(struct udphdr);
+    tot_len = ip_tot_len + sizeof(struct ether_header);
+    *send_len = tot_len;
+
+    datagram = (uint8_t *) calloc(1, tot_len);
+
+    struct udp_pheader psh;
+
+    struct ether_header *eh = (struct ether_header *) datagram;
+
+    struct iphdr *iph = (struct iphdr *) (datagram +
+            sizeof(struct ether_header));
+    struct udphdr *udph = (struct udphdr *) (datagram +
+            sizeof(struct ether_header) + sizeof(struct iphdr));
+
+    data_buf = datagram + sizeof(struct ether_header) + sizeof(struct iphdr) +
+        sizeof(struct udphdr);
+    memcpy(data_buf, data, data_len);
+
+    // Ethernet frame
+    eh->ether_type = htons(ETH_P_IP);
+    memcpy(eh->ether_shost, mac_shost, 6);
+    memcpy(eh->ether_dhost, mac_dhost, 6);
+
+    // IP Header
+    iph->ihl = 5;
+    iph->version = 4;
+    iph->tot_len = htons(ip_tot_len);
+    iph->id = htons(0);
+    iph->frag_off = 0;
+    iph->ttl = 255;
+    iph->protocol = IPPROTO_UDP;
+    // Source ip
+    iph->saddr = saddr->s_addr;
+    // Dest ip
+    iph->daddr = daddr->s_addr;
+
+    // Ip checksum
+    iph->check = cksum((uint8_t *)iph, sizeof(struct iphdr));
+
+    //UDP header
+    udph->source = htons(67);
+    udph->dest = htons(68);
+    udph->len = htons(sizeof(struct udphdr) + data_len);
+
+    //Now the UDP checksum using the pseudo header
+    psh.source_address = iph->saddr;
+    psh.dest_address = iph->daddr;
+    psh.placeholder = 0;
+    psh.protocol = IPPROTO_UDP;
+    psh.udp_length = htons(sizeof(struct udphdr) + data_len);
+
+    // Udp checksum
+    udp_csum = cksum_part((uint8_t*)&psh, sizeof(struct udp_pheader), 0);
+    udp_csum = cksum_part((uint8_t*)udph, sizeof(struct udphdr), udp_csum);
+    udp_csum = cksum_part((uint8_t*)data, data_len, udp_csum);
+    udph->check = cksum_finish(udp_csum);
+
+    return eh;
 }
 
