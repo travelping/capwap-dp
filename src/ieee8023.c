@@ -432,8 +432,8 @@ int ieee8023_to_wtp(struct worker *w, struct client *wtp, unsigned int rid,
 }
 
 struct ether_header* fill_raw_udp_packet(void *data, uint16_t data_len,
-        struct in_addr *saddr, uint8_t *mac_shost,
-        struct in_addr *daddr, uint8_t *mac_dhost, uint16_t *send_len)
+        uint32_t saddr, uint8_t *mac_shost,
+        uint32_t daddr, uint8_t *mac_dhost, uint16_t *send_len)
 {
     uint8_t *datagram, *data_buf;
     uint16_t ip_tot_len, tot_len;
@@ -472,9 +472,9 @@ struct ether_header* fill_raw_udp_packet(void *data, uint16_t data_len,
     iph->ttl = 255;
     iph->protocol = IPPROTO_UDP;
     // Source ip
-    iph->saddr = saddr->s_addr;
+    iph->saddr = saddr;
     // Dest ip
-    iph->daddr = daddr->s_addr;
+    iph->daddr = daddr;
 
     // Ip checksum
     iph->check = cksum((uint8_t *)iph, sizeof(struct iphdr));

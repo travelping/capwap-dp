@@ -904,8 +904,8 @@ static void erl_send_dhcp_packet(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 	long bin_len;
     uint16_t send_len = 0;
     struct ifreq if_mac, if_ip;
-    unsigned char *mac_shost, *mac_dhost;
-    struct in_addr *saddr, *daddr;
+    uint8_t *mac_shost, *mac_dhost;
+    uint32_t saddr, daddr;
 
     if (arity != 2) {
 		ei_x_encode_atom(x_out, "badarg");
@@ -918,37 +918,32 @@ static void erl_send_dhcp_packet(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
     }
 
     dhcp_replay = (struct dhcp_packet*)(x_in->buff + x_in->index - bin_len);
-    daddr = &dhcp_replay->yiaddr;
-    mac_dhost = (unsigned char *)dhcp_replay->chaddr;
 
+    // Get the MAC address of the TAP interface
+    memset(&if_mac, 0, sizeof(struct ifreq));
+    strncpy(if_mac.ifr_name, tap_dev, IFNAMSIZ);
+    if (ioctl(workers[send_worker].tap_fd, SIOCGIFHWADDR, &if_mac) < 0) {
+        perror("SIOCGIFHWADDR");
+    }
+    mac_shost = (unsigned char *)if_mac.ifr_hwaddr.sa_data;
+    mac_dhost = (unsigned char *)dhcp_replay->chaddr;
 
     if (dhcp_replay->flags & 0x80) {
         // Broadcast packet
-        debug("broadcast answer");
-        // ETHER
-		/* pkt->ipi_spec_dst.s_addr = INADDR_ANY; */
-
-        // IP
-		/* daddr.sin_addr.s_addr = INADDR_BROADCAST; */
+        saddr = INADDR_ANY;
+        daddr = INADDR_BROADCAST;
     } else {
         // Unicast packet
-        debug("unicast answer");
-
-        // Get the MAC address of the TAP interface
-        memset(&if_mac, 0, sizeof(struct ifreq));
-        strncpy(if_mac.ifr_name, tap_dev, IFNAMSIZ);
-        if (ioctl(workers[send_worker].tap_fd, SIOCGIFHWADDR, &if_mac) < 0) {
-            perror("SIOCGIFHWADDR");
-        }
-
+        // Get client IP and MAC from DHCP packet
+        daddr = dhcp_replay->yiaddr.s_addr;
         // Get the IP address of the TAP interface
         memset(&if_ip, 0, sizeof(struct ifreq));
-        strncpy(if_ip.ifr_name, tap_dev, IFNAMSIZ);
+        if_ip.ifr_addr.sa_family = AF_INET;
+        strncpy(if_ip.ifr_name, tap_dev, IFNAMSIZ - 1);
         if (ioctl(workers[send_worker].tap_fd, SIOCGIFADDR, &if_ip) < 0) {
             perror("SIOCGIFADDR");
         }
-        saddr = &((struct sockaddr_in *)&if_ip.ifr_addr)->sin_addr;
-        mac_shost = (unsigned char *)if_mac.ifr_hwaddr.sa_data;
+        saddr = ((struct sockaddr_in *)&if_ip.ifr_addr)->sin_addr.s_addr;
     }
 
     packet = fill_raw_udp_packet(dhcp_replay, bin_len, saddr, mac_shost,
