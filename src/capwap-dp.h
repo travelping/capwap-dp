@@ -146,7 +146,7 @@ struct worker {
 
 	int tap_fd;
 	int capwap_fd;
-    int dhcp_fd;
+	int dhcp_fd;
 
 	struct ratelimit unknown_wtp_limit;
 

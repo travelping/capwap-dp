@@ -24,7 +24,6 @@
 
 #include <assert.h>
 #include <errno.h>
-#include <stdio.h>
 
 #include <sys/uio.h>
 #include <netinet/udp.h>

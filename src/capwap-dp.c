@@ -28,7 +28,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <stdio.h>
 #include <inttypes.h>
 #include <errno.h>
 #include <sys/mman.h>
@@ -39,7 +38,6 @@
 #include <arpa/inet.h>
 #include <sys/ioctl.h>
 #include <getopt.h>
-#include <sys/types.h>
 
 #include <urcu.h>            /* RCU flavor */
 #include <urcu/uatomic.h>
@@ -899,22 +897,22 @@ static void erl_get_stats(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 
 static void erl_send_dhcp_packet(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 {
-	struct dhcp_packet *dhcp_replay;
+    struct dhcp_packet *dhcp_replay;
     struct iovec *packet;
-	long bin_len;
+    long bin_len;
     uint16_t send_len = 0;
     struct ifreq if_mac, if_ip;
     uint8_t *mac_shost, *mac_dhost;
     uint32_t saddr, daddr;
 
     if (arity != 2) {
-		ei_x_encode_atom(x_out, "badarg");
-		return;
+        ei_x_encode_atom(x_out, "badarg");
+        return;
     }
 
-	if (ei_decode_binary(x_in->buff, &x_in->index, NULL, &bin_len) != 0) {
-		ei_x_encode_atom(x_out, "badarg");
-		return;
+    if (ei_decode_binary(x_in->buff, &x_in->index, NULL, &bin_len) != 0) {
+        ei_x_encode_atom(x_out, "badarg");
+        return;
     }
 
     dhcp_replay = (struct dhcp_packet*)(x_in->buff + x_in->index - bin_len);
@@ -947,12 +945,12 @@ static void erl_send_dhcp_packet(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
     }
 
     packet = fill_raw_udp_packet(dhcp_replay, bin_len, saddr, mac_shost,
-        daddr, mac_dhost, &send_len);
+            daddr, mac_dhost, &send_len);
 
     forward_dhcp(&workers[send_worker], mac_dhost, packet, send_len);
 
     free(packet);
-	ei_x_encode_atom(x_out, "ok");
+    ei_x_encode_atom(x_out, "ok");
 }
 
 static void handle_gen_call_capwap(struct controller *cnt, const char *fn, int arity, ei_x_buff *x_in, ei_x_buff *x_out)
@@ -1286,7 +1284,7 @@ void capwap_in(const struct sockaddr *addr,
 	ei_x_encode_tuple_header(&x, 3);
 	ei_x_encode_atom(&x, "capwap_in");
 	ei_x_encode_sockaddr(&x, addr);
-	/* hexdump(buf, len); */
+	hexdump(buf, len);
 	ei_x_encode_binary(&x, (void *)buf, len);
 
 	control_enqueue(&x);
@@ -1433,7 +1431,7 @@ static void usage(void)
 	       "  -n, --netns=NAMESPACE             open CAPWAP socket in namespace\n"
 	       "  -f, --forward-netns=NAMESPACE     create TAP interface in namespace\n"
 	       "  --honor-df                        send ICMP notice based on IP DF bit\n"
-           "  --dhcp-relay                      enable DHCP Relay on tap interface\n"
+	       "  --dhcp-relay                      enable DHCP Relay on tap interface\n"
 	       "\n");
 
 	exit(EXIT_SUCCESS);
@@ -1463,7 +1461,7 @@ int main(int argc, char *argv[])
 	};
 
 	int on = 1;
-	int cfg_num_workers = 1;
+	int cfg_num_workers = 8;
 
 	char *config_file = SYSCONFDIR "/capwap-dp.conf";
 
