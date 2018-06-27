@@ -900,7 +900,7 @@ static void erl_get_stats(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 static void erl_send_dhcp_packet(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 {
 	struct dhcp_packet *dhcp_replay;
-    void *packet;
+    struct iovec *packet;
 	long bin_len;
     uint16_t send_len = 0;
     struct ifreq if_mac, if_ip;
@@ -948,7 +948,9 @@ static void erl_send_dhcp_packet(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 
     packet = fill_raw_udp_packet(dhcp_replay, bin_len, saddr, mac_shost,
         daddr, mac_dhost, &send_len);
-    ieee8023_to_sta(&workers[send_worker], mac_dhost, VLAN_PASS, packet, send_len);
+
+    forward_dhcp(&workers[send_worker], mac_dhost, packet, send_len);
+
     free(packet);
 	ei_x_encode_atom(x_out, "ok");
 }

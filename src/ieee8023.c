@@ -16,10 +16,24 @@
  *
  */
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#define _REENTRANT
+
+#include <assert.h>
+#include <errno.h>
+#include <stdio.h>
+
 #include <sys/uio.h>
 #include <netinet/udp.h>
 #include <netinet/ip_icmp.h>
 #include <netinet/icmp6.h>
+
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include <ev.h>
 
@@ -99,14 +113,26 @@ static uint16_t cksum(uint8_t *ip, int len)
 	return cksum_finish(cksum_part(ip, len, 0));
 }
 
-static int df_bit(const unsigned char *buffer, ssize_t len)
+static void *offset_iovec(struct iovec *buffer, ssize_t size, ssize_t offs)
 {
-	struct ether_header *ether = (struct ether_header *)buffer;
+    ssize_t indx = 0, current_offs = 0;
+    for (; indx < size; indx++) {
+        if(buffer[indx].iov_len + current_offs > offs) {
+            return (unsigned char*)buffer[indx].iov_base + (offs - current_offs);
+        }
+    }
+
+    return NULL;
+}
+
+static int df_bit(struct iovec *buffer, ssize_t len, unsigned int buf_size)
+{
+	struct ether_header *ether = (struct ether_header *)buffer[0].iov_len;
 
 	switch (ntohs(ether->ether_type)) {
 	case ETHERTYPE_IP: {
 		ssize_t plen = len - sizeof(struct ether_header);
-		struct ip *ip = (struct ip *)(ether + 1);
+		struct ip *ip = (struct ip *)offset_iovec(buffer, buf_size, sizeof(struct ether_header));
 
 		if (plen < sizeof(struct ip))
 			return 0;
@@ -120,9 +146,10 @@ static int df_bit(const unsigned char *buffer, ssize_t len)
 }
 
 static int send_icmp_pkt_to_big(struct worker *w, unsigned int mtu,
-        const unsigned char *buffer, ssize_t len)
+        struct iovec *buffer, ssize_t len, unsigned int buf_size)
 {
-	struct ether_header *ether_in = (struct ether_header *)buffer;
+    debug("   send icmp");
+	struct ether_header *ether_in = (struct ether_header *)buffer[0].iov_base;
 	struct ether_header *ether_out;
 	struct iovec iov[2];
 	unsigned char b[128];
@@ -137,7 +164,7 @@ static int send_icmp_pkt_to_big(struct worker *w, unsigned int mtu,
 
 	iov[0].iov_base = &b;
 	/* skip the ether header */
-	iov[1].iov_base = (unsigned char *)buffer + sizeof(struct ether_header);
+	iov[1].iov_base = offset_iovec(buffer, buf_size, sizeof(struct ether_header));
 
 	ether_out = (struct ether_header *)&b;
 	memcpy(ether_out->ether_dhost, ether_in->ether_shost, sizeof(ether_out->ether_dhost));
@@ -148,7 +175,7 @@ static int send_icmp_pkt_to_big(struct worker *w, unsigned int mtu,
 
 	switch (ntohs(ether_in->ether_type)) {
 	case ETHERTYPE_IP: {
-		struct iphdr *ip_in = (struct iphdr *)(ether_in + 1);
+		struct iphdr *ip_in = (struct iphdr *)iov[1].iov_base;
 		struct iphdr *iph = (struct iphdr *)(ether_out + 1);
 
 		/* Only reply to fragment 0. */
@@ -157,7 +184,8 @@ static int send_icmp_pkt_to_big(struct worker *w, unsigned int mtu,
 
 		/* If we send an ICMP error to an ICMP error a mess would result.. */
 		if (ip_in->protocol == IPPROTO_ICMP) {
-			struct icmphdr *icmph = (struct icmphdr *)(buffer + sizeof(struct ether_header) + ip_in->ihl * 4);
+			struct icmphdr *icmph = (struct icmphdr *)offset_iovec(buffer, buf_size,
+                    sizeof(struct ether_header) + ip_in->ihl * 4);
 
 			/* Assume any unknown ICMP type is an error. */
 			if (icmph->type > CAA_ARRAY_SIZE(icmp_pointers) || icmp_pointers[icmph->type])
@@ -304,20 +332,87 @@ int ieee8023_to_wtp(struct worker *w, struct client *wtp, unsigned int rid,
 			   const unsigned char *wbinfo, ssize_t wbinfo_len,
 			   const unsigned char *buffer, ssize_t len)
 {
+    int ret;
+    struct iovec iov = {
+        .iov_base = (unsigned char*)buffer,
+        .iov_len = len
+    };
+
+    ret = ieee8023_iov_to_wtp(w, wtp, rid, wbinfo, wbinfo_len, &iov, 1);
+
+	return ret;
+}
+
+int forward_dhcp(struct worker *w, const unsigned char *mac,
+			   struct iovec *buffer, unsigned int buffer_size)
+{
+	struct station *sta;
+	struct client *wtp = NULL;
+
+	rcu_read_lock();
+
+	sta = find_station(mac);
+
+	if (!sta) {
+		goto out_unlock;
+    }
+
+	wtp = rcu_dereference(sta->wtp);
+	if (wtp) {
+		/* the STA and WTP pointers are under RCU protection, so no-one will free them
+		 * as long as we hold the RCU read lock */
+
+		debug("found STA %p, WTP %p", sta, wtp);
+
+        ssize_t len = 0;
+
+        for (int i = 0; i < buffer_size; i++) {
+            len += buffer[i].iov_len;
+        }
+
+		uatomic_inc(&sta->send_pkts);
+		uatomic_add(&sta->send_bytes, len);
+
+		ieee8023_iov_to_wtp(w, wtp, sta->rid, NULL, 0, buffer, buffer_size);
+	}
+
+out_unlock:
+	rcu_read_unlock();
+	return 1;
+
+}
+
+int ieee8023_iov_to_wtp(struct worker *w, struct client *wtp, unsigned int rid,
+			   const unsigned char *wbinfo, ssize_t wbinfo_len,
+			   struct iovec *buffer, unsigned int buffer_size)
+{
 	ssize_t r __attribute__((unused));
-	struct iovec iov[2];
+	struct iovec *iov;
 	struct msghdr mh;
 	int piov;
 
 	ssize_t hlen;
 	unsigned char chdr[32];
 
-	unsigned int mtu;
+	unsigned int mtu, i;
 	int is_frag = 0;
 	unsigned int frag_id = 0;
 	unsigned int frag_count = 1;
-	ssize_t max_len;
+	ssize_t max_len, iov_len;
+    ssize_t len = 0;
+
+    for (i = 0; i < buffer_size; i++) {
+        len += buffer[i].iov_len;
+    }
 	ssize_t frag_size = len;
+
+	if (wbinfo != NULL && wbinfo_len != 0) {
+        debug("with wbinfo");
+        iov_len = buffer_size + 2;
+    } else {
+        debug("without wbinfo");
+        iov_len = buffer_size + 1;
+    }
 
 	/* TODO: calculate hlen based on binding and optional header */
 	hlen = 2;
@@ -336,17 +431,17 @@ int ieee8023_to_wtp(struct worker *w, struct client *wtp, unsigned int rid,
 	}
 
 	debug("Aligned MSS: %zd", frag_size);
-	debug("Fragments #: %d", frag_count);
+	debug("Fragments #: %u", frag_count);
 	debug("is_frag:     %d", is_frag);
-	debug("df_bit:      %d", df_bit(buffer, len));
+	debug("df_bit:      %d", df_bit(buffer, len, buffer_size));
 
-	if (honor_df && is_frag && df_bit(buffer, len))
-		return send_icmp_pkt_to_big(w, max_len - sizeof(struct ether_header), buffer, len);
+	if (honor_df && is_frag && df_bit(buffer, len, buffer_size))
+		return send_icmp_pkt_to_big(w, max_len - sizeof(struct ether_header), buffer, len, buffer_size);
 
 	if (is_frag && !frag_id)
 		frag_id = uatomic_add_return(&wtp->fragment_id, 1);
 
-	debug("frag_id: %d", frag_id);
+	debug("frag_id: %u", frag_id);
 
 	memset(chdr, 0, sizeof(chdr));
 
@@ -367,9 +462,12 @@ int ieee8023_to_wtp(struct worker *w, struct client *wtp, unsigned int rid,
 
 	/* The message header contains parameters for sendmsg.    */
 	memset(&mh, 0, sizeof(mh));
-	mh.msg_name = (caddr_t)&wtp->addr;
-	mh.msg_namelen = sizeof(wtp->addr);
-	mh.msg_iov = iov;
+    mh.msg_name = &wtp->addr;
+    mh.msg_namelen = sizeof(wtp->addr);
+
+    iov = malloc(iov_len * sizeof(struct iovec));
+
+    mh.msg_iov = iov;
 
 	iov[0].iov_base = chdr;
 	iov[0].iov_len = hlen * 4;
@@ -382,20 +480,28 @@ int ieee8023_to_wtp(struct worker *w, struct client *wtp, unsigned int rid,
 		piov++;
 	}
 
-	iov[piov].iov_base = (unsigned char *)buffer;
-	iov[piov].iov_len = frag_size;
+	ssize_t current_len = 0, offs = 0, pivot_offs = 0, indx;
 
-	mh.msg_iovlen = piov + 1;
+    for (; pivot_offs < buffer_size; pivot_offs++) {
+        indx = piov + pivot_offs;
+        iov[indx].iov_base = buffer[pivot_offs].iov_base;
+        iov[indx].iov_len = buffer[pivot_offs].iov_len;
+        if(current_len + buffer[pivot_offs].iov_len >= frag_size) {
+            offs = (current_len + buffer[pivot_offs].iov_len) % frag_size;
+            iov[indx].iov_len -= offs;
+            break;
+        }
+        current_len += buffer[pivot_offs].iov_len;
+    }
 
-	ssize_t offs = 0;
+    mh.msg_iovlen = piov + pivot_offs + 1;
 
 	for (; frag_count > 0; frag_count--) {
-		debug("Id: %d, Count: %d", frag_id, frag_count);
+		debug("Id: %u, Count: %u", frag_id, frag_count);
 		if (caa_unlikely(is_frag)) {
 			SET_CAPWAP_HEADER_FIELD(&((uint32_t *)chdr)[1], offs / 8, CAPWAP_FRAG_OFFS_MASK, CAPWAP_FRAG_OFFS_SHIFT);
 			if (frag_count == 1) {
 				((uint32_t *)chdr)[0] |= CAPWAP_F_LASTFRAG;
-				iov[piov].iov_len = len % frag_size;
 			}
 		}
 
@@ -414,49 +520,47 @@ int ieee8023_to_wtp(struct worker *w, struct client *wtp, unsigned int rid,
 			uatomic_add(&wtp->send_bytes, r);
 		}
 
-		if (caa_unlikely(((uint32_t *)chdr)[0] & CAPWAP_F_WSI)) {
-			/* don't send WSI on following fragements */
-			piov--;
-			mh.msg_iovlen--;
+        iov[0].iov_base = chdr;
+        iov[0].iov_len = hlen * 4;
+        current_len = 0;
+        for (indx = 1; pivot_offs < buffer_size; pivot_offs++, indx++) {
+            if (caa_unlikely(indx == 1)) {
+                iov[indx].iov_base = (unsigned char *)buffer[pivot_offs].iov_base + offs;
+                iov[indx].iov_len = buffer[pivot_offs].iov_len - offs;
+            } else {
+                iov[indx].iov_base = buffer[pivot_offs].iov_base;
+                iov[indx].iov_len = buffer[pivot_offs].iov_len;
+            }
 
-			((uint32_t *)chdr)[0] &= ~CAPWAP_F_WSI;
-			iov[piov].iov_base = (unsigned char *)buffer;
-			iov[piov].iov_len = frag_size;
-		}
+            if(current_len + iov[indx].iov_len > frag_size) {
+                offs = (current_len + iov[indx].iov_len) % frag_size;
+                iov[indx].iov_len = offs;
+                break;
+            }
+            current_len += iov[indx].iov_len;
+        }
 
-		iov[piov].iov_base = (unsigned char *)iov[piov].iov_base + frag_size;
-		offs += frag_size;
+        mh.msg_iovlen = indx + 1;
 	}
 
+    free(iov);
 	return 1;
 }
 
-struct ether_header* fill_raw_udp_packet(void *data, uint16_t data_len,
-        uint32_t saddr, uint8_t *mac_shost,
-        uint32_t daddr, uint8_t *mac_dhost, uint16_t *send_len)
+struct iovec* fill_raw_udp_packet(void *data, uint16_t data_len,
+    uint32_t saddr, uint8_t *mac_shost,
+    uint32_t daddr, uint8_t *mac_dhost, uint16_t *send_len)
 {
-    uint8_t *datagram, *data_buf;
-    uint16_t ip_tot_len, tot_len;
+	struct iovec *iov;
+    uint16_t ip_tot_len;
     uint32_t udp_csum;
 
     ip_tot_len = data_len + sizeof(struct iphdr) + sizeof(struct udphdr);
-    tot_len = ip_tot_len + sizeof(struct ether_header);
-    *send_len = tot_len;
-
-    datagram = (uint8_t *) calloc(1, tot_len);
-
     struct udp_pheader psh;
 
-    struct ether_header *eh = (struct ether_header *) datagram;
-
-    struct iphdr *iph = (struct iphdr *) (datagram +
-            sizeof(struct ether_header));
-    struct udphdr *udph = (struct udphdr *) (datagram +
-            sizeof(struct ether_header) + sizeof(struct iphdr));
-
-    data_buf = datagram + sizeof(struct ether_header) + sizeof(struct iphdr) +
-        sizeof(struct udphdr);
-    memcpy(data_buf, data, data_len);
+    struct ether_header *eh = calloc(1, sizeof(struct ether_header));
+    struct iphdr *iph = calloc(1, sizeof(struct iphdr));
+    struct udphdr *udph = calloc(1, sizeof(struct udphdr));
 
     // Ethernet frame
     eh->ether_type = htons(ETH_P_IP);
@@ -497,6 +601,18 @@ struct ether_header* fill_raw_udp_packet(void *data, uint16_t data_len,
     udp_csum = cksum_part((uint8_t*)data, data_len, udp_csum);
     udph->check = cksum_finish(udp_csum);
 
-    return eh;
+    iov = calloc(4, sizeof(struct iovec));
+    *send_len = 4;
+
+    iov[0].iov_base = eh;
+    iov[0].iov_len = sizeof(struct ether_header);
+    iov[1].iov_base = iph;
+    iov[1].iov_len = sizeof(struct iphdr);
+    iov[2].iov_base = udph;
+    iov[2].iov_len = sizeof(struct udphdr);
+    iov[3].iov_base = data;
+    iov[3].iov_len = data_len;
+
+    return iov;
 }
 

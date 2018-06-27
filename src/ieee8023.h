@@ -31,8 +31,14 @@ int ieee8023_to_wtp(struct worker *w, struct client *wtp, unsigned int rid,
 			   const unsigned char *wbinfo, ssize_t wbinfo_len,
 			   const unsigned char *buffer, ssize_t len);
 
-struct ether_header* fill_raw_udp_packet(void *data, uint16_t data_len,
+struct iovec* fill_raw_udp_packet(void *data, uint16_t data_len,
         uint32_t saddr, uint8_t *mac_shost,
         uint32_t daddr, uint8_t *mac_dhost, uint16_t *send_len);
 
+int forward_dhcp(struct worker *w, const unsigned char *mac,
+			   struct iovec *buffer, unsigned int buffer_size);
+
+int ieee8023_iov_to_wtp(struct worker *w, struct client *wtp, unsigned int rid,
+			   const unsigned char *wbinfo, ssize_t wbinfo_len,
+			   struct iovec *buffer, unsigned int buffer_size);
 #endif // __IEEE8023_H
