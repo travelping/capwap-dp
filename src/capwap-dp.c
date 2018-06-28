@@ -28,7 +28,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <stdio.h>
 #include <inttypes.h>
 #include <errno.h>
 #include <sys/mman.h>
@@ -37,14 +36,17 @@
 #include <sys/time.h>
 #include <sys/uio.h>
 #include <arpa/inet.h>
+#include <sys/ioctl.h>
 #include <getopt.h>
 
-#include <urcu.h>               /* RCU flavor */
+#include <urcu.h>            /* RCU flavor */
 #include <urcu/uatomic.h>
-#include <urcu/ref.h>		/* ref counting */
-#include <urcu/rculist.h>       /* RCU list */
-#include <urcu/rculfqueue.h>    /* RCU Lock-free queue */
-#include <urcu/rculfhash.h>	/* RCU Lock-free hash table */
+#include <urcu/ref.h>		 /* ref counting */
+#include <urcu/rculist.h>    /* RCU list */
+#include <urcu/rculfqueue.h> /* RCU Lock-free queue */
+#include <urcu/rculfhash.h>	 /* RCU Lock-free hash table */
+#include <net/if.h>
+
 #include "jhash.h"
 
 #include <libconfig.h>
@@ -62,6 +64,8 @@ void* ei_malloc (long size);
 #include "log.h"
 #include "capwap-dp.h"
 #include "netns.h"
+#include "dhcp_internal.h"
+#include "ieee8023.h"
 
 #define API_VERSION      1
 
@@ -90,6 +94,7 @@ struct controller {
 	struct cds_list_head controllers;
 
 	int fd;
+	int dhcp_fd;
 	ErlConnect conp;
 
 	ev_io ev_read;
@@ -890,6 +895,64 @@ static void erl_get_stats(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 	ei_x_encode_empty_list(x_out);
 }
 
+static void erl_send_dhcp_packet(int arity, ei_x_buff *x_in, ei_x_buff *x_out)
+{
+    struct dhcp_packet *dhcp_replay;
+    struct iovec *packet;
+    long bin_len;
+    uint16_t send_len = 0;
+    struct ifreq if_mac, if_ip;
+    uint8_t *mac_shost, *mac_dhost;
+    uint32_t saddr, daddr;
+
+    if (arity != 2) {
+        ei_x_encode_atom(x_out, "badarg");
+        return;
+    }
+
+    if (ei_decode_binary(x_in->buff, &x_in->index, NULL, &bin_len) != 0) {
+        ei_x_encode_atom(x_out, "badarg");
+        return;
+    }
+
+    dhcp_replay = (struct dhcp_packet*)(x_in->buff + x_in->index - bin_len);
+
+    // Get the MAC address of the TAP interface
+    memset(&if_mac, 0, sizeof(struct ifreq));
+    strncpy(if_mac.ifr_name, tap_dev, IFNAMSIZ);
+    if (ioctl(workers[send_worker].tap_fd, SIOCGIFHWADDR, &if_mac) < 0) {
+        perror("SIOCGIFHWADDR");
+    }
+    mac_shost = (unsigned char *)if_mac.ifr_hwaddr.sa_data;
+    mac_dhost = (unsigned char *)dhcp_replay->chaddr;
+
+    if (dhcp_replay->flags & 0x80) {
+        // Broadcast packet
+        saddr = INADDR_ANY;
+        daddr = INADDR_BROADCAST;
+    } else {
+        // Unicast packet
+        // Get client IP and MAC from DHCP packet
+        daddr = dhcp_replay->yiaddr.s_addr;
+        // Get the IP address of the TAP interface
+        memset(&if_ip, 0, sizeof(struct ifreq));
+        if_ip.ifr_addr.sa_family = AF_INET;
+        strncpy(if_ip.ifr_name, tap_dev, IFNAMSIZ - 1);
+        if (ioctl(workers[send_worker].tap_fd, SIOCGIFADDR, &if_ip) < 0) {
+            perror("SIOCGIFADDR");
+        }
+        saddr = ((struct sockaddr_in *)&if_ip.ifr_addr)->sin_addr.s_addr;
+    }
+
+    packet = fill_raw_udp_packet(dhcp_replay, bin_len, saddr, mac_shost,
+            daddr, mac_dhost, &send_len);
+
+    forward_dhcp(&workers[send_worker], mac_dhost, packet, send_len);
+
+    free(packet);
+    ei_x_encode_atom(x_out, "ok");
+}
+
 static void handle_gen_call_capwap(struct controller *cnt, const char *fn, int arity, ei_x_buff *x_in, ei_x_buff *x_out)
 {
 	if (strncmp(fn, "sendto", 6) == 0) {
@@ -936,6 +999,9 @@ static void handle_gen_call_capwap(struct controller *cnt, const char *fn, int a
 	}
 	else if (strncmp(fn, "get_stats", 9) == 0) {
 		erl_get_stats(arity, x_in, x_out);
+	}
+	else if (strncmp(fn, "send_dhcp_packet", 16) == 0) {
+		erl_send_dhcp_packet(arity, x_in, x_out);
 	}
 	else
 		ei_x_encode_atom(x_out, "error");
@@ -1224,6 +1290,20 @@ void capwap_in(const struct sockaddr *addr,
 	control_enqueue(&x);
 }
 
+void dhcp_in(unsigned char *buf, ssize_t len)
+{
+	ei_x_buff x;
+
+	/* prealloc enough space to hold the data plus the Erlang encoded meta data */
+	ei_x_new_size(&x, 48 + len);
+	ei_x_encode_version(&x);
+	ei_x_encode_tuple_header(&x, 2);
+	ei_x_encode_atom(&x, "dhcp_in");
+	ei_x_encode_binary(&x, (void *)buf, len);
+
+	control_enqueue(&x);
+}
+
 void packet_in_tap(uint16_t vlan, const unsigned char *buf, ssize_t len)
 {
 	ei_x_buff x;
@@ -1351,6 +1431,7 @@ static void usage(void)
 	       "  -n, --netns=NAMESPACE             open CAPWAP socket in namespace\n"
 	       "  -f, --forward-netns=NAMESPACE     create TAP interface in namespace\n"
 	       "  --honor-df                        send ICMP notice based on IP DF bit\n"
+	       "  --dhcp-relay                      enable DHCP Relay on tap interface\n"
 	       "\n");
 
 	exit(EXIT_SUCCESS);
@@ -1362,6 +1443,7 @@ int capwap_port = 5247;
 const char *capwap_ns = NULL;
 const char *fwd_ns = NULL;
 int honor_df = 0;
+int dhcp_relay = 0;
 
 int unknown_wtp_limit_interval = 1000;
 int unknown_wtp_limit_bucket = 30;
@@ -1397,6 +1479,7 @@ int main(int argc, char *argv[])
 			{"sname",         1, 0, 1024},
 			{"name",          1, 0, 1025},
 			{"honor-df",      1, 0, 1026},
+			{"dhcp-relay",    0, 0, 1027},
 			{"v4only",        0, 0, '4'},
 			{"v6only",        0, 0, '6'},
 			{"forward-netns", 1, 0, 'f'},
@@ -1437,6 +1520,10 @@ int main(int argc, char *argv[])
 		case 1026:
 			honor_df = 1;
 			break;
+
+        case 1027:
+            dhcp_relay = 1;
+            break;
 
 		case '4':
 			if (v6only) {
@@ -1515,6 +1602,7 @@ int main(int argc, char *argv[])
 		config_lookup_int(&cfg, "capwap.ratelimit.unknown-wtp.bucket", &unknown_wtp_limit_bucket);
 
 		config_lookup_int(&cfg, "capwap.workers", &cfg_num_workers);
+		config_lookup_bool(&cfg, "dhcprelay.enable", &dhcp_relay);
 	} else {
 		fprintf(stderr, "can't open config file %s, running with default config\n", config_file);
 		log(LOG_WARNING, "can't open config file %s, running with default config", config_file);

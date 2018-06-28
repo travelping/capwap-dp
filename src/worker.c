@@ -67,17 +67,18 @@
 #include "capwap-dp.h"
 #include "netns.h"
 #include "dhcp_internal.h"
-
-#define VLAN_ID(x)  ((x) & 0x0ffff)
+#include "ieee8023.h"
 
 int num_workers;
 struct worker *workers;
+char *tap_dev;
 
 struct cds_lfht *ht_stations;	/* Hash table */
 struct cds_lfht *ht_clients;	/* Hash table */
 
 static int capwap_ns_fd = 0;
 static int fwd_ns_fd = 0;
+static int dhcp_ns_fd = 0;
 
 static unsigned long get_ts()
 {
@@ -853,6 +854,48 @@ out_unlock:
 	rcu_read_unlock();
 }
 
+static int validate_pkt(struct dhcp_packet *pkt, size_t pkt_len)
+{
+	if (pkt_len < sizeof(struct dhcp_packet))
+		return 0;
+
+	if (pkt->op != BOOTREQUEST)
+		return 0;
+
+	if (pkt->htype != 1 && pkt->hlen != 6)
+		/* only Ethernet is supported */
+		return 0;
+
+	return 1;
+}
+
+static void dhcp_recv(struct worker *w, struct msghdr *msg,
+        unsigned char *buffer, unsigned int len)
+{
+	char ipaddr[INET6_ADDRSTRLEN] __attribute__((unused));
+
+#if defined(DEBUG)
+	const struct sockaddr *addr = (struct sockaddr *)msg->msg_name;
+	inet_ntop(addr->sa_family, SIN_ADDR_PTR(addr), ipaddr, sizeof(ipaddr));
+	debug("read %d bytes from %s:%d",
+	      len, ipaddr, ntohs(SIN_PORT(addr)));
+#endif
+
+	rcu_read_lock();
+
+	uatomic_inc(&w->rcvd_pkts);
+	uatomic_add(&w->rcvd_bytes, len);
+
+    if (!validate_pkt((struct dhcp_packet *)buffer, len)) {
+		goto out_unlock;
+	}
+
+    dhcp_in(buffer, len);
+
+out_unlock:
+	rcu_read_unlock();
+}
+
 static void wtp_update_mtu(struct sockaddr *addr, int mtu)
 {
 	struct client *wtp;
@@ -870,10 +913,10 @@ static void wtp_update_mtu(struct sockaddr *addr, int mtu)
 static void handle_icmp_error(struct sock_extended_err *sock_err,
 			      struct sockaddr *remote)
 {
-	struct sockaddr *addr = SO_EE_OFFENDER(sock_err);
 	char ipaddr[INET6_ADDRSTRLEN] __attribute__((unused));
 
 #if defined(DEBUG)
+	struct sockaddr *addr = SO_EE_OFFENDER(sock_err);
 	inet_ntop(addr->sa_family, SIN_ADDR_PTR(addr), ipaddr, sizeof(ipaddr));
 	debug("ICMP Offender IP: %s:%d", ipaddr, ntohs(SIN_PORT(addr)));
 
@@ -1057,384 +1100,40 @@ static void capwap_cb(EV_P_ ev_io *ev, int revents)
 #undef BUFSIZE
 }
 
-static int df_bit(const unsigned char *buffer, ssize_t len)
+static void dhcpsrv_ev_cb(EV_P_ ev_io *ev, int revents)
 {
-	struct ether_header *ether = (struct ether_header *)buffer;
+	int i;
+	ssize_t r;
+#define VLEN 16
+#define BUFSIZE 2048
 
-	switch (ntohs(ether->ether_type)) {
-	case ETHERTYPE_IP: {
-		ssize_t plen = len - sizeof(struct ether_header);
-		struct ip *ip = (struct ip *)(ether + 1);
+	struct mmsghdr msgs[VLEN];
+	struct sockaddr_storage addrs[VLEN];
+	struct iovec iovecs[VLEN];
+	unsigned char bufs[VLEN][BUFSIZE];
 
-		if (plen < sizeof(struct ip))
-			return 0;
+	struct worker *w = ev_userdata (EV_A);
 
-		return !!(ntohs(ip->ip_off) & IP_DF);
-	}
-	case ETHERTYPE_IPV6:
-		return 1;
-	}
-	return 0;
-}
-
-/*
- *      This table is the definition of how we handle ICMP.
- */
-static const unsigned char icmp_pointers[] = {
-	[ICMP_ECHOREPLY] = 0,
-	[1] = 1,
-	[2] = 1,
-	[ICMP_DEST_UNREACH] = 1,
-	[ICMP_SOURCE_QUENCH] = 1,
-	[ICMP_REDIRECT] = 1,
-	[6] = 1,
-	[7] = 1,
-	[ICMP_ECHO] = 0,
-	[9] = 1,
-	[10] = 1,
-	[ICMP_TIME_EXCEEDED] = 1,
-	[ICMP_PARAMETERPROB] = 1,
-	[ICMP_TIMESTAMP] = 0,
-	[ICMP_TIMESTAMPREPLY] = 0,
-	[ICMP_INFO_REQUEST] = 0,
-	[ICMP_INFO_REPLY] = 0,
-	[ICMP_ADDRESS] = 0,
-	[ICMP_ADDRESSREPLY] = 0
-};
-
-static uint32_t cksum_part(uint8_t *ip, int len, uint32_t sum)
-{
-	while (len > 1) {
-		sum += *(uint16_t *)ip;
-		if (sum & 0x80000000)   /* if high order bit set, fold */
-			sum = (sum & 0xFFFF) + (sum >> 16);
-		len -= 2;
-		ip += 2;
+	memset(msgs, 0, sizeof(msgs));
+	for (i = 0; i < VLEN; i++) {
+		msgs[i].msg_hdr.msg_name    = &addrs[i];
+		msgs[i].msg_hdr.msg_namelen = sizeof(struct sockaddr_storage);
+		iovecs[i].iov_base          = bufs[i];
+		iovecs[i].iov_len           = BUFSIZE;
+		msgs[i].msg_hdr.msg_iov     = &iovecs[i];
+		msgs[i].msg_hdr.msg_iovlen  = 1;
 	}
 
-	if (len)       /* take care of left over byte */
-		sum += (uint16_t) *(uint8_t *)ip;
+	r = recvmmsg(ev->fd, msgs, VLEN, MSG_DONTWAIT, NULL);
 
-	return sum;
-}
-
-static uint16_t cksum_finish(uint32_t sum)
-{
-	while (sum >> 16)
-		sum = (sum & 0xFFFF) + (sum >> 16);
-
-	return ~sum;
-}
-
-static uint16_t cksum(uint8_t *ip, int len)
-{
-	return cksum_finish(cksum_part(ip, len, 0));
-}
-
-static int send_icmp_pkt_to_big(struct worker *w, unsigned int mtu, const unsigned char *buffer, ssize_t len)
-{
-	struct ether_header *ether_in = (struct ether_header *)buffer;
-	struct ether_header *ether_out;
-	struct iovec iov[2];
-	unsigned int room;
-	unsigned char b[128];
-	int r __attribute__((unused));
-
-	/* No replies to physical multicast/broadcast */
-	debug("ether_dhost: 0x%02x, %d", ether_in->ether_dhost[0], ether_in->ether_dhost[0] & 0x01);
-	if (ether_in->ether_dhost[0] & 0x01)
-		return 1;
-
-	memset(&b, 0, sizeof(b));
-
-	iov[0].iov_base = &b;
-	/* skip the ether header */
-	iov[1].iov_base = (unsigned char *)buffer + sizeof(struct ether_header);
-
-	ether_out = (struct ether_header *)&b;
-	memcpy(ether_out->ether_dhost, ether_in->ether_shost, sizeof(ether_out->ether_dhost));
-	memcpy(ether_out->ether_shost, ether_in->ether_dhost, sizeof(ether_out->ether_shost));
-	ether_out->ether_type = ether_in->ether_type;
-
-	debug("ether_type: %d", ntohs(ether_in->ether_type));
-
-	switch (ntohs(ether_in->ether_type)) {
-	case ETHERTYPE_IP: {
-		struct iphdr *ip_in = (struct iphdr *)(ether_in + 1);
-		struct iphdr *iph = (struct iphdr *)(ether_out + 1);
-
-		/* Only reply to fragment 0. */
-		if (ip_in->frag_off & htons(0x1FFF))
-			return 1;
-
-		/* If we send an ICMP error to an ICMP error a mess would result.. */
-		if (ip_in->protocol == IPPROTO_ICMP) {
-			struct icmphdr *icmph = (struct icmphdr *)(buffer + sizeof(struct ether_header) + ip_in->ihl * 4);
-
-			/* Assume any unknown ICMP type is an error. */
-			if (icmph->type > CAA_ARRAY_SIZE(icmp_pointers) || icmp_pointers[icmph->type])
-				return 1;
-		}
-
-		iov[0].iov_len = sizeof(struct ether_header) + sizeof(struct iphdr) + sizeof(struct icmphdr);
-		iov[1].iov_len = len - sizeof(struct ether_header);
-
-		/* RFC says return as much as we can without exceeding 576 bytes. */
-		room = 576 - sizeof(struct iphdr) + sizeof(struct icmphdr);
-		if (iov[1].iov_len > room)
-			iov[1].iov_len = room;
-
-
-		iph->version = 4;
-		iph->ihl = sizeof(struct iphdr) / 4;
-		iph->tot_len = htons(sizeof(struct iphdr) + sizeof(struct icmphdr) + iov[1].iov_len);
-		iph->ttl = 64;
-		iph->tos = (ip_in->tos & IPTOS_TOS_MASK) | IPTOS_PREC_INTERNETCONTROL;
-		iph->protocol = IPPROTO_ICMP;
-		iph->saddr = ip_in->daddr;               /* FIXME: this should be OUR address */
-		iph->daddr = ip_in->saddr;
-		iph->check = cksum((uint8_t *)iph, sizeof(struct iphdr));
-
-		/*
-		 * we don't do IP options
-		 */
-
-		struct icmphdr *icmp = (struct icmphdr *)(iph + 1);
-
-		icmp->type        = ICMP_DEST_UNREACH;
-		icmp->code        = ICMP_FRAG_NEEDED;
-		icmp->un.frag.mtu = htons(mtu);
-
-		uint32_t csum;
-		csum = cksum_part((uint8_t *)icmp, sizeof(struct icmphdr), 0);
-		csum = cksum_part((uint8_t *)iov[1].iov_base, iov[1].iov_len, csum);
-		icmp->checksum = cksum_finish(csum);
-
-		/* send! */
-		if ((r = writev(w->tap_fd, iov, 2)) < 0) {
-			debug("writev: %m");
-		}
-		debug("send icmp writev: %d", r);
+	debug("%zd dhcp messages received", r);
+	for (i = 0; i < r; i++) {
+		debug("flags: %d", msgs[i].msg_hdr.msg_flags);
+		debug("received dhcp size %d", msgs[i].msg_len);
+		dhcp_recv(w, &msgs[i].msg_hdr, bufs[i], msgs[i].msg_len);
 	}
-	break;
-
-	case ETHERTYPE_IPV6:
-		/* TODO !!! */
-		break;
-
-	default:
-		return 1;
-	}
-
-
-	return 1;
-}
-
-static int ieee8023_to_wtp(struct worker *w, struct client *wtp, unsigned int rid,
-			   const unsigned char *wbinfo, ssize_t wbinfo_len,
-			   const unsigned char *buffer, ssize_t len)
-{
-	ssize_t r __attribute__((unused));
-	struct iovec iov[2];
-	struct msghdr mh;
-	int piov;
-
-	ssize_t hlen;
-	unsigned char chdr[32];
-
-	unsigned int mtu;
-	int is_frag = 0;
-	unsigned int frag_id = 0;
-	unsigned int frag_count = 1;
-	ssize_t max_len;
-	ssize_t frag_size = len;
-
-	/* TODO: calculate hlen based on binding and optional header */
-	hlen = 2;
-
-	if (wbinfo != NULL && wbinfo_len != 0)
-		hlen += (wbinfo_len + 3) / 4;
-
-	mtu = uatomic_read(&wtp->mtu);
-
-	max_len = mtu - sizeof(struct iphdr) - sizeof(struct udphdr) - hlen * 4;
-
-	if (len > max_len) {
-		frag_size = ((mtu - sizeof(struct iphdr) - sizeof(struct udphdr) - hlen * 4) / 8) * 8;
-		frag_count = (len + frag_size - 1) / frag_size;
-		is_frag = 1;
-	}
-
-	debug("Aligned MSS: %zd", frag_size);
-	debug("Fragments #: %d", frag_count);
-	debug("is_frag:     %d", is_frag);
-	debug("df_bit:      %d", df_bit(buffer, len));
-
-	if (honor_df && is_frag && df_bit(buffer, len))
-		return send_icmp_pkt_to_big(w, max_len - sizeof(struct ether_header), buffer, len);
-
-	if (is_frag && !frag_id)
-		frag_id = uatomic_add_return(&wtp->fragment_id, 1);
-
-	debug("frag_id: %d", frag_id);
-
-	memset(chdr, 0, sizeof(chdr));
-
-	/* Version = 0, Type = 0, HLen = 8, RId = 1, WBID 802.11, 802.3 encoding */
-	((uint32_t *)chdr)[0] = htobe32((hlen << CAPWAP_HLEN_SHIFT) |
-					(rid << CAPWAP_RID_SHIFT) |
-					(CAPWAP_802_11_PAYLOAD << CAPWAP_WBID_SHIFT));
-
-	if (wbinfo != NULL && wbinfo_len != 0)
-		((uint32_t *)chdr)[0] |= CAPWAP_F_WSI;
-
-	if (is_frag) {
-		((uint32_t *)chdr)[0] |= CAPWAP_F_FRAG;
-		uatomic_inc(&w->send_fragments);
-		uatomic_inc(&wtp->send_fragments);
-	}
-	((uint32_t *)chdr)[1] = htobe32(frag_id << CAPWAP_FRAG_ID_SHIFT);
-
-	/* The message header contains parameters for sendmsg.    */
-	memset(&mh, 0, sizeof(mh));
-	mh.msg_name = (caddr_t)&wtp->addr;
-	mh.msg_namelen = sizeof(wtp->addr);
-	mh.msg_iov = iov;
-
-	iov[0].iov_base = chdr;
-	iov[0].iov_len = hlen * 4;
-
-	piov = 1;
-	if (wbinfo != NULL && wbinfo_len != 0) {
-		/* WSI */
-		iov[piov].iov_base = (unsigned char *)wbinfo;
-		iov[piov].iov_len = wbinfo_len;
-		piov++;
-	}
-
-	iov[piov].iov_base = (unsigned char *)buffer;
-	iov[piov].iov_len = frag_size;
-
-	mh.msg_iovlen = piov + 1;
-
-	ssize_t offs = 0;
-
-	for (; frag_count > 0; frag_count--) {
-		debug("Id: %d, Count: %d", frag_id, frag_count);
-		if (caa_unlikely(is_frag)) {
-			SET_CAPWAP_HEADER_FIELD(&((uint32_t *)chdr)[1], offs / 8, CAPWAP_FRAG_OFFS_MASK, CAPWAP_FRAG_OFFS_SHIFT);
-			if (frag_count == 1) {
-				((uint32_t *)chdr)[0] |= CAPWAP_F_LASTFRAG;
-				iov[piov].iov_len = len % frag_size;
-			}
-		}
-
-		/* FIXME: shortcat write, we do want to use NON-BLOCKING send here and
-		 *        switch to write_ev should it block....
-		 */
-		if ((r = sendmsg(w->capwap_fd, &mh, MSG_DONTWAIT)) < 0)
-			debug("sendmsg: %m");
-
-		debug("fwd tap sendmsg: %zd", r);
-
-		if (r > 0) {
-			uatomic_inc(&w->send_pkts);
-			uatomic_inc(&wtp->send_pkts);
-			uatomic_add(&w->send_bytes, r);
-			uatomic_add(&wtp->send_bytes, r);
-		}
-
-		if (caa_unlikely(((uint32_t *)chdr)[0] & CAPWAP_F_WSI)) {
-			/* don't send WSI on following fragements */
-			piov--;
-			mh.msg_iovlen--;
-
-			((uint32_t *)chdr)[0] &= ~CAPWAP_F_WSI;
-			iov[piov].iov_base = (unsigned char *)buffer;
-			iov[piov].iov_len = frag_size;
-		}
-
-		iov[piov].iov_base = (unsigned char *)iov[piov].iov_base + frag_size;
-		offs += frag_size;
-	}
-
-	return 1;
-}
-
-static int ieee8023_to_sta(struct worker *w, const unsigned char *mac, uint16_t vlan,
-			   const unsigned char *buffer, ssize_t len)
-{
-	struct station *sta;
-	struct client *wtp = NULL;
-
-	debug("STA MAC: " PRIsMAC, ARGsMAC(mac));
-
-	rcu_read_lock();
-
-	sta = find_station(mac);
-	if (!sta)
-		goto out_unlock;
-
-	if (VLAN_ID(sta->vlan) != VLAN_ID(vlan))
-		goto out_unlock;
-
-	wtp = rcu_dereference(sta->wtp);
-	if (wtp) {
-		/* the STA and WTP pointers are under RCU protection, so no-one will free them
-		 * as long as we hold the RCU read lock */
-
-		debug("found STA %p, WTP %p", sta, wtp);
-
-		uatomic_inc(&sta->send_pkts);
-		uatomic_add(&sta->send_bytes, len);
-
-		/* queue packet to WTP */
-		ieee8023_to_wtp(w, wtp, sta->rid, NULL, 0, buffer, len);
-	}
-
-out_unlock:
-	rcu_read_unlock();
-	return 1;
-}
-
-static int ieee8023_bcast_to_wtps(struct worker *w, uint16_t vlan, const unsigned char *buffer, ssize_t len)
-{
-	struct cds_lfht_iter iter;      /* For iteration on hash table */
-	struct client *wtp;
-	struct wlan *wlan;
-	struct ieee80211_wbinfo wbinfo[MAX_RADIOS];
-
-	memset(wbinfo, 0, sizeof(wbinfo));
-
-	rcu_read_lock();
-
-	cds_lfht_for_each_entry(ht_clients, &iter, wtp, node) {
-		debug("WTP %p, stations: %d", wtp, uatomic_read(&wtp->sta_count));
-
-		if (uatomic_read(&wtp->sta_count) == 0)
-			continue;
-
-		cds_hlist_for_each_entry_rcu_2(wlan, &wtp->wlans, wlan_list) {
-			if (VLAN_ID(wlan->vlan) != VLAN_ID(vlan))
-				continue;
-
-			wbinfo[wlan->rid].wlan_id_bitmap |= htons(1 << (wlan->wlan_id - 1));
-		}
-
-		/* queue packet to WTP */
-		for (int rid = 1; rid < MAX_RADIOS; rid++) {
-			if (wbinfo[rid].wlan_id_bitmap == 0)
-				continue;
-
-			wbinfo[rid].length = 4;
-			ieee8023_to_wtp(w, wtp, rid, (unsigned char *)&wbinfo[rid],
-					sizeof(struct ieee80211_wbinfo), buffer, len);
-		}
-	}
-
-	rcu_read_unlock();
-
-	return 1;
+#undef VLEN
+#undef BUFSIZE
 }
 
 static void tap_multicast(struct worker *w, uint16_t vlan, unsigned char *buffer, ssize_t len)
@@ -1531,7 +1230,7 @@ static void tap_cb(EV_P_ ev_io *ev, int revents)
 		uint16_t vlan;
 
 		debug("read %zd bytes", r);
-//		hexdump(buffer, r);
+		hexdump(buffer, r);
 
 		vlan = strip_vlan_tag(&buf, &r);
 
@@ -1606,11 +1305,14 @@ static void *worker_thread(void *arg)
 {
 	int on = 1;
 	int domain;
+	int mtu = IP_PMTUDISC_DONT;
+    int opt = 1;
 
 	struct sockaddr_storage saddr;
 	ssize_t saddr_len;
 	struct worker *w = (struct worker *)arg;
 
+    struct ifreq ifr;
 	/*
 	 * Each thread need using RCU read-side need to be explicitly
 	 * registered.
@@ -1646,6 +1348,7 @@ static void *worker_thread(void *arg)
 		exit(EXIT_FAILURE);
 	}
 
+
 	setsockopt(w->capwap_fd, SOL_SOCKET, SO_REUSEADDR, (char*)&on, sizeof(on));
 #if !defined(SO_REUSEPORT)
 #       warning "SO_REUSEPORT undefined, please upgrade to a newer kernel"
@@ -1668,6 +1371,52 @@ static void *worker_thread(void *arg)
 
 	ev_async_init(&w->stop_ev, stop_cb);
 	ev_async_start(w->loop, &w->stop_ev);
+
+    if (dhcp_relay) {
+        debug("enable DHCP relay");
+        if (dhcp_ns_fd) {
+            w->dhcp_fd = socket_ns(dhcp_ns_fd, PF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        } else {
+            w->dhcp_fd = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        }
+
+        if (w->dhcp_fd < 0) {
+            perror("socket dhcp");
+            exit(EXIT_FAILURE);
+        }
+
+        fcntl(w->dhcp_fd, F_SETFD, FD_CLOEXEC | fcntl(w->dhcp_fd, F_GETFD));
+        fcntl(w->dhcp_fd, F_SETFL, O_NONBLOCK);
+
+        memset(&ifr, 0, sizeof(ifr));
+        debug("bind dhcp socket on interface %s", tap_dev);
+        strncpy(ifr.ifr_name, tap_dev, IFNAMSIZ);
+
+        setsockopt(w->dhcp_fd, SOL_SOCKET, SO_BINDTODEVICE, &ifr, sizeof(ifr));
+        setsockopt(w->dhcp_fd, SOL_IP, IP_MTU_DISCOVER, &mtu, sizeof(mtu));
+        setsockopt(w->dhcp_fd, SOL_IP, IP_PKTINFO, &opt, sizeof(opt));
+        setsockopt(w->dhcp_fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
+#if !defined(SO_REUSEPORT)
+#       warning "SO_REUSEPORT undefined, please upgrade to a newer kernel"
+#else
+        setsockopt(w->dhcp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#endif
+
+
+        struct sockaddr_in dhcp_addr;
+
+        memset(&dhcp_addr, 0, sizeof(dhcp_addr));
+        dhcp_addr.sin_family = AF_INET;
+        dhcp_addr.sin_port = htons(DHCP_SERVER_PORT);
+        dhcp_addr.sin_addr.s_addr = INADDR_ANY;
+
+        if (bind(w->dhcp_fd, (struct sockaddr *)&dhcp_addr, saddr_len) < 0) {
+                close(w->dhcp_fd);
+                exit(EXIT_FAILURE);
+        }
+        ev_io_init(&w->dhcp_ev, dhcpsrv_ev_cb, w->dhcp_fd, EV_READ);
+        ev_io_start(w->loop, &w->dhcp_ev);
+    }
 
 	ev_io_init(&w->capwap_ev, capwap_cb, w->capwap_fd, EV_READ);
 	ev_io_start(w->loop, &w->capwap_ev);
@@ -1699,7 +1448,7 @@ static void *worker_thread(void *arg)
 
 int start_worker(size_t count)
 {
-	char tap_dev[IFNAMSIZ] = "\0";
+    tap_dev = (char *)calloc(IFNAMSIZ, sizeof(char));
 
 	if (!(workers = calloc(count, sizeof(struct worker))))
 		return 0;

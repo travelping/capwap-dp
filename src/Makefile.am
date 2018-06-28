@@ -7,7 +7,7 @@ AM_CFLAGS = -D_GNU_SOURCE -Wall -Wno-strict-aliasing -g -funit-at-a-time -std=gn
 bin_PROGRAMS = capwap-dp
 sysconf_DATA = capwap-dp.conf
 
-capwap_dp_SOURCES = capwap-dp.c worker.c netns.c log.c
+capwap_dp_SOURCES = capwap-dp.c worker.c netns.c log.c ieee8023.c
 capwap_dp_LDADD = $(URCU_LIBS) $(URCUCDS_LIBS) $(LIBCONFIG_LIBS) $(SYSTEMD_DAEMON_LIBS) $(SYSTEMD_JOURNAL_LIBS)
 
 DISTCLEANFILES = *~
