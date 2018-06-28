@@ -126,7 +126,7 @@ static void *offset_iovec(struct iovec *buffer, ssize_t size, ssize_t offs)
 
 static int df_bit(struct iovec *buffer, ssize_t len, unsigned int buf_size)
 {
-	struct ether_header *ether = (struct ether_header *)buffer[0].iov_len;
+	struct ether_header *ether = (struct ether_header *)buffer[0].iov_base;
 
 	switch (ntohs(ether->ether_type)) {
 	case ETHERTYPE_IP: {
