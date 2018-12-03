@@ -1,4 +1,4 @@
-FROM alpine:3.7 AS build-env
+FROM alpine:3.8 AS build-env
 
 RUN mkdir /src && \
     apk update && \
@@ -14,19 +14,26 @@ RUN cd /src && \
     ./configure --prefix=/usr && \
     make && \
     make install
-ADD . /src/capwap-dp
-RUN cd /src/capwap-dp && \
-    ./autogen.sh && \
-    ./configure --prefix=/usr --sysconfdir=/etc/capwap-dp && \
-    make && \
-    make install DESTDIR=/src/capwap-dp/build && \
-    ls -lR build && \
-    ldd /src/capwap-dp/build/usr/bin/capwap-dp
 
-FROM alpine:3.7
+# build capwap-dp
+ADD . /src/capwap-dp
+WORKDIR src/capwap-dp
+RUN ./autogen.sh && \
+    ./configure --prefix=/usr --sysconfdir=/etc/capwap-dp --enable-debug && \
+    make && \
+    make install DESTDIR=/src/capwap-dp/build
+# split binary into <binary> and <binary.debug> (a file which contains the
+# debug symbols)
+WORKDIR /src/capwap-dp/build/usr/bin/
+RUN objcopy --only-keep-debug capwap-dp capwap-dp.debug && \
+    strip --strip-debug --strip-unneeded capwap-dp && \
+    objcopy --add-gnu-debuglink=capwap-dp.debug capwap-dp
+
+RUN find /src/capwap-dp/build
+
+FROM alpine:3.8
 WORKDIR /
-RUN apk update && \
-    apk upgrade --no-cache && \
-    apk add --no-cache libconfig libev userspace-rcu
+ADD ./docker/entrypoint.sh /entrypoint.sh
+RUN apk --update --no-cache add libconfig libev userspace-rcu iproute2 bridge-utils
 COPY --from=build-env /src/capwap-dp/build /
-ENTRYPOINT [ "/usr/bin/capwap-dp" ]
+ENTRYPOINT [ "/entrypoint.sh" ]
