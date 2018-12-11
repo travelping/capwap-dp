@@ -9,7 +9,7 @@ RUN mkdir /src && \
 		       libev-dev \
 		       userspace-rcu-dev
 RUN cd /src && \
-    wget -O - ftp://ftp.gnu.org/gnu/shtool/shtool-2.0.8.tar.gz | tar xzf - && \
+    wget -O - http://ftp.gnu.org/gnu/shtool/shtool-2.0.8.tar.gz | tar xzf - && \
     cd shtool-2.0.8 && \
     ./configure --prefix=/usr && \
     make && \
