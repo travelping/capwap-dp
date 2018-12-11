@@ -764,7 +764,7 @@ static void handle_capwap_fragment(struct worker *w, struct client *wtp, struct 
 		debug("Fragment too old");
 		uatomic_inc(&w->err_fragment_too_old);
 		uatomic_inc(&wtp->err_fragment_too_old);
-		return;
+		goto out_unlock;
 	}
 
 	if (id - wtp->frgmt_buffer.base > MAX_FRAGMENTS)
@@ -784,6 +784,7 @@ static void handle_capwap_fragment(struct worker *w, struct client *wtp, struct 
 			wtp->frgmt_buffer.base++;
 	}
 
+out_unlock:
 	pthread_mutex_unlock(&wtp->frgmt_buffer.lock);
 }
 
