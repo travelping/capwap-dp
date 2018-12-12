@@ -8,18 +8,12 @@ RUN mkdir /src && \
 		       libconfig-dev \
 		       libev-dev \
 		       userspace-rcu-dev
-RUN cd /src && \
-    wget -O - http://ftp.gnu.org/gnu/shtool/shtool-2.0.8.tar.gz | tar xzf - && \
-    cd shtool-2.0.8 && \
-    ./configure --prefix=/usr && \
-    make && \
-    make install
 
 # build capwap-dp
 ADD . /src/capwap-dp
 WORKDIR src/capwap-dp
 RUN ./autogen.sh && \
-    ./configure --prefix=/usr --sysconfdir=/etc/capwap-dp --enable-debug && \
+    env CFLAGS="-O2 -g" LDFLAGS="-g" ./configure --prefix=/usr --sysconfdir=/etc/capwap-dp && \
     make && \
     make install DESTDIR=/src/capwap-dp/build
 # split binary into <binary> and <binary.debug> (a file which contains the
