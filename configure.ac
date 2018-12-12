@@ -15,7 +15,7 @@ AM_INIT_AUTOMAKE(1.9)
 AC_SRCDIR_PREFIX(srcdir_prefix)
 AC_HEADLINE(dnl
 TPOSS CAPWAP Data Path, dnl
-[Copyright (c) 2017 Travelping GmbH <info@travelping.com>])
+[Copyright (c) 2018 Travelping GmbH <info@travelping.com>])
 AM_CONFIG_HEADER(config.h)
 AC_PREFIX_DEFAULT(/usr)
 AC_PLATFORM(PLATFORM)
