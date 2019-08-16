@@ -301,11 +301,14 @@ static void ei_x_encode_sta(ei_x_buff *x, struct station *sta)
 	ei_x_encode_ulong(x, sta->vlan);
 	ei_x_encode_ulong(x, sta->rid);
 	ei_x_encode_ether(x, sta->bssid);
-	ei_x_encode_tuple_header(x, 4);
+	ei_x_encode_tuple_header(x, 7);
 	ei_x_encode_longlong(x, uatomic_read(&sta->rcvd_pkts));
 	ei_x_encode_longlong(x, uatomic_read(&sta->send_pkts));
 	ei_x_encode_longlong(x, uatomic_read(&sta->rcvd_bytes));
 	ei_x_encode_longlong(x, uatomic_read(&sta->send_bytes));
+	ei_x_encode_long(x, uatomic_read(&sta->rssi));
+	ei_x_encode_long(x, uatomic_read(&sta->snr));
+	ei_x_encode_long(x, uatomic_read(&sta->data_rate));
 }
 
 static void ei_x_encode_wtp(ei_x_buff *x, struct client *clnt)
