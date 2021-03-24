@@ -1,10 +1,9 @@
-FROM alpine:3.8 AS build-env
+FROM erlang:23.2.7.0-alpine AS build-env
 
 RUN mkdir /src && \
     apk update && \
     apk upgrade --no-cache  && \
     apk add --no-cache gcc build-base automake autoconf libtool pkgconf make linux-headers \
-		       erlang-dev \
 		       libconfig-dev \
 		       libev-dev \
 		       userspace-rcu-dev
@@ -25,7 +24,7 @@ RUN objcopy --only-keep-debug capwap-dp capwap-dp.debug && \
 
 RUN find /src/capwap-dp/build
 
-FROM alpine:3.8
+FROM alpine:3.13
 WORKDIR /
 ADD ./docker/entrypoint.sh /entrypoint.sh
 RUN apk --update --no-cache add libconfig libev userspace-rcu iproute2 bridge-utils
