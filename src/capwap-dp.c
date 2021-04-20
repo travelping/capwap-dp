@@ -310,17 +310,18 @@ static void ei_x_encode_sta(ei_x_buff *x, struct station *sta)
 
 static void ei_x_encode_wtp(ei_x_buff *x, struct client *clnt)
 {
+	struct cds_hlist_node *pos;
 	struct station *sta;
 	struct wlan *wlan;
 
 	ei_x_encode_tuple_header(x, 6);
 	ei_x_encode_sockaddr(x, (struct sockaddr *)&clnt->addr);
-	cds_hlist_for_each_entry_rcu_2(wlan, &clnt->wlans, wlan_list) {
+	cds_hlist_for_each_entry_rcu(wlan, pos, &clnt->wlans, wlan_list) {
 		ei_x_encode_list_header(x, 1);
 		ei_x_encode_wlan(x, wlan);
 	}
 	ei_x_encode_empty_list(x);
-	cds_hlist_for_each_entry_rcu_2(sta, &clnt->stations, wtp_list) {
+	cds_hlist_for_each_entry_rcu(sta, pos, &clnt->stations, wtp_list) {
 		ei_x_encode_list_header(x, 1);
 		ei_x_encode_sta(x, sta);
 	}
