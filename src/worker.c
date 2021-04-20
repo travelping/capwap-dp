@@ -1402,6 +1402,7 @@ static int ieee8023_bcast_to_wtps(struct worker *w, uint16_t vlan, const unsigne
 {
 	struct cds_lfht_iter iter;      /* For iteration on hash table */
 	struct client *wtp;
+	struct cds_hlist_node *pos;
 	struct wlan *wlan;
 	struct ieee80211_wbinfo wbinfo[MAX_RADIOS];
 
@@ -1415,7 +1416,7 @@ static int ieee8023_bcast_to_wtps(struct worker *w, uint16_t vlan, const unsigne
 		if (uatomic_read(&wtp->sta_count) == 0)
 			continue;
 
-		cds_hlist_for_each_entry_rcu_2(wlan, &wtp->wlans, wlan_list) {
+		cds_hlist_for_each_entry_rcu(wlan, pos, &wtp->wlans, wlan_list) {
 			if (VLAN_ID(wlan->vlan) != VLAN_ID(vlan))
 				continue;
 
