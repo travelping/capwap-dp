@@ -3,6 +3,12 @@ capwap-dp
 
 CAPWAP Datapath element
 
+Version 1.3.0 - 07 Jul 2021
+---------------------------
+
+* Fix deadlock in handling CAPWAP fragments
+* Switch to Container Images as deployment method
+
 Version 1.2.0 - 03 Mar 2017
 ---------------------------
 
