@@ -421,7 +421,8 @@ unsigned long hash_sockaddr(const struct sockaddr *addr)
 
 static void forward_capwap(struct worker *w, struct client *wtp, const struct sockaddr *addr,
 			   unsigned int rid, const unsigned char *radio_mac, unsigned int radio_mac_len,
-			   struct ether_header *ether, unsigned char *data, unsigned int len)
+			   struct ether_header *ether, unsigned char *data, unsigned int len,
+			   const unsigned char *wsi)
 {
 	struct station *sta;
 	int r __attribute__((unused));
@@ -453,6 +454,18 @@ static void forward_capwap(struct worker *w, struct client *wtp, const struct so
 		/* queue packet to TAP */
 		uatomic_inc(&sta->rcvd_pkts);
 		uatomic_add(&sta->rcvd_bytes, len + ETH_ALEN * 2);
+
+		if(wsi != NULL) {
+			int8_t rssi = (*wsi) & 0xFF;
+			int8_t snr = ((*wsi) >> 16) & 0xFF;
+			int16_t data_rate = (*wsi) >> 24;
+
+			debug("RSSI %d SNR %d DR %d", rssi, snr, data_rate);
+
+			uatomic_set(&sta->rssi, rssi);
+			uatomic_set(&sta->snr, snr);
+			uatomic_set(&sta->data_rate, data_rate);
+		}
 
 		n = 0;
 
@@ -518,6 +531,8 @@ static void handle_capwap_packet(struct worker *w, struct client *wtp, struct ms
 	unsigned int wbid;
 	unsigned int radio_mac_len = 0;
 	unsigned char *radio_mac = NULL;
+	unsigned char *wsi = NULL;
+	uint8_t optional_shift = 0;
 
 	rid = GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_RID_MASK, CAPWAP_RID_SHIFT);
 
@@ -529,12 +544,17 @@ static void handle_capwap_packet(struct worker *w, struct client *wtp, struct ms
 	if (GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_F_RMAC, 0)) {
 		radio_mac_len = *(uint8_t *)(buffer + 8);
 		radio_mac = (uint8_t *)(buffer + 9);
+		optional_shift = 8;
+	}
+
+	if (GET_CAPWAP_HEADER_FIELD(buffer, CAPWAP_F_WSI, 1)) {
+		wsi = (uint8_t *)(buffer + 9 + optional_shift);
 	}
 
 	switch (wbid) {
 	case CAPWAP_802_3_PAYLOAD:
 		forward_capwap(w, wtp, addr, rid, radio_mac, radio_mac_len,
-			       (struct ether_header *)data, data + ETH_ALEN * 2, datalen - ETH_ALEN * 2);
+			       (struct ether_header *)data, data + ETH_ALEN * 2, datalen - ETH_ALEN * 2, wsi);
 		break;
 
 	case CAPWAP_802_11_PAYLOAD: {
@@ -579,7 +599,7 @@ static void handle_capwap_packet(struct worker *w, struct client *wtp, struct ms
 				memcpy(&ether->ether_shost, &hdr->addr3, ETH_ALEN);
 
 				forward_capwap(w, wtp, addr, rid, radio_mac, radio_mac_len, ether,
-					       data + hdrlen, datalen - hdrlen);
+					       data + hdrlen, datalen - hdrlen, wsi);
 				break;
 			}
 			}

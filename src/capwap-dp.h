@@ -90,6 +90,10 @@ struct station {
 	unsigned long send_pkts;
 	unsigned long rcvd_bytes;
 	unsigned long send_bytes;
+
+	int8_t rssi;
+	int8_t snr;
+	int16_t data_rate;
 };
 
 struct client {
