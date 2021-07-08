@@ -1,4 +1,4 @@
-FROM erlang:23.2.7.0-alpine AS build-env
+FROM quay.io/travelping/alpine-erlang:23.3.4 AS build-env
 
 RUN mkdir /src && \
     apk update && \
@@ -24,7 +24,7 @@ RUN objcopy --only-keep-debug capwap-dp capwap-dp.debug && \
 
 RUN find /src/capwap-dp/build
 
-FROM alpine:3.13
+FROM alpine:3.14
 WORKDIR /
 ADD ./docker/entrypoint.sh /entrypoint.sh
 RUN apk --update --no-cache add libconfig libev userspace-rcu iproute2 bridge-utils
